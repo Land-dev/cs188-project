@@ -23,8 +23,8 @@ FLIGHT_HEIGHT = 0.5   # Altitude in m; avoid low hover (e.g. 0.1) for stability
 INIT_XYZS = np.array([[0, 0, FLIGHT_HEIGHT]])
 INIT_RPYS = np.array([[0, 0, 0]])
 
-# ----- Occupancy map setup -----
-MAP_SIZE = 10
+# ----- Occupancy map setup (6×6 m box, same as arena) -----
+MAP_SIZE = 6
 MAP_RES = 0.1
 MAP_DIM = int(MAP_SIZE / MAP_RES)
 occupancy_map = np.zeros((MAP_DIM, MAP_DIM), dtype=np.uint8)
@@ -42,21 +42,20 @@ def map_to_world(mx, my):
 
 
 def create_maze(py_client):
-    """Spawn a simple 2D maze made of box walls in PyBullet."""
+    """Spawn a 6×6 m box boundary and a few pillar obstacles in PyBullet."""
     wall_height = 1.0
     wall_thickness = 0.03
     half_h = wall_height / 2.0
     color = [0.2, 0.2, 0.8, 1.0]
 
+    # Half-length of each wall for 6×6 m inner area (walls at ±3 m)
+    box_half = 3.0
+
     def add_wall(x, y, half_length, orientation="x"):
         if orientation == "x":
             half_extents = [half_length, wall_thickness / 2.0, half_h]
-            min_x, max_x = x - half_length, x + half_length
-            min_y, max_y = y - wall_thickness / 2.0, y + wall_thickness / 2.0
         else:
             half_extents = [wall_thickness / 2.0, half_length, half_h]
-            min_x, max_x = x - wall_thickness / 2.0, x + wall_thickness / 2.0
-            min_y, max_y = y - half_length, y + half_length
         col = p.createCollisionShape(
             p.GEOM_BOX,
             halfExtents=half_extents,
@@ -76,26 +75,52 @@ def create_maze(py_client):
             physicsClientId=py_client,
         )
 
-    # Outer square boundary around the origin (approx 4 m × 4 m)
-    add_wall(0.0, 2.0, half_length=2.0, orientation="x")   # top
-    add_wall(0.0, -2.0, half_length=2.0, orientation="x")  # bottom
-    add_wall(-2.0, 0.0, half_length=2.0, orientation="y")  # left
-    add_wall(2.0, 0.0, half_length=2.0, orientation="y")   # right
+    # Outer 6×6 m box boundary
+    add_wall(0.0, box_half, half_length=box_half, orientation="x")    # top
+    add_wall(0.0, -box_half, half_length=box_half, orientation="x")    # bottom
+    add_wall(-box_half, 0.0, half_length=box_half, orientation="y")    # left
+    add_wall(box_half, 0.0, half_length=box_half, orientation="y")     # right
 
-    # Internal maze walls (simple zig-zag corridors)
-    add_wall(-1.0, 0.0, half_length=1.5, orientation="y")
-    add_wall(0.0, 1.0, half_length=1.5, orientation="x")
-    add_wall(1.0, -0.5, half_length=1.0, orientation="y")
-    add_wall(0.0, -1.5, half_length=1.0, orientation="x")
+    # Pillar obstacles (cylinders, same height as walls)
+    pillar_radius = 0.08
+    pillar_color = [0.4, 0.3, 0.2, 1.0]
+    pillar_positions = [
+        (-1.2, 1.2),
+        (1.5, -0.8),
+        (-0.8, -1.5),
+        (1.8, 1.5),
+        (-1.8, 0.0),
+    ]
+    col_pillar = p.createCollisionShape(
+        p.GEOM_CYLINDER,
+        radius=pillar_radius,
+        height=wall_height,
+        physicsClientId=py_client,
+    )
+    vis_pillar = p.createVisualShape(
+        p.GEOM_CYLINDER,
+        radius=pillar_radius,
+        length=wall_height,
+        rgbaColor=pillar_color,
+        physicsClientId=py_client,
+    )
+    for px, py in pillar_positions:
+        p.createMultiBody(
+            baseMass=0.0,
+            baseCollisionShapeIndex=col_pillar,
+            baseVisualShapeIndex=vis_pillar,
+            basePosition=[px, py, half_h],
+            physicsClientId=py_client,
+        )
 
 
 # ----- Exploration parameters -----
-# Map bounds (world coords): explore the full occupancy grid
-MAP_BOUND = MAP_SIZE / 2.0 - MAP_RES  # e.g. 4.9 so we stay inside 10m map
-GOAL_REACHED_DIST = 0.2
+# Map = 6×6 box (world ±3 m); MAP_BOUND keeps goals inside
+MAP_BOUND = MAP_SIZE / 2.0 - MAP_RES
+GOAL_REACHED_DIST = 0.3
 MAX_GOAL_STEPS = 25   # seconds; allow time to reach goals outside center
 FRONTIER_MIN_NEIGHBORS = 2  # min unknown neighbors to count as frontier
-PATH_WAYPOINT_DIST = 0.2   # consider waypoint reached when within this
+PATH_WAYPOINT_DIST = 0.3   # consider waypoint reached when within this
 BOUNDARY_BIAS = 1.5   # prefer goals with |x| or |y| >= this (explore outer area)
 REPLAN_AVOID_THRESHOLD = 2.0   # replan path when avoidance force magnitude exceeds this
 
@@ -119,31 +144,46 @@ def get_frontiers():
     return frontiers
 
 
+def get_frontier_unknown_cells():
+    """Return unknown cells (0) that border free space (128) — candidates for exploration goals."""
+    out = []
+    for mx in range(1, MAP_DIM - 1):
+        for my in range(1, MAP_DIM - 1):
+            if occupancy_map[mx, my] != 0:
+                continue  # not unknown
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    if occupancy_map[mx + dx, my + dy] == 128:
+                        out.append((mx, my))
+                        break
+    return out
+
+
 def sample_exploration_goal(drone_xy):
-    """Pick next goal to maximize map coverage: prefer frontier cells toward outer area, else farthest unknown."""
-    frontiers = get_frontiers()
+    """Pick next goal in unexplored (unknown) space: prefer frontier-unknown cells, else random unknown."""
+    unexplored = get_frontier_unknown_cells()  # unknown cells that border free space
     drone_mx, drone_my = world_to_map(drone_xy[0], drone_xy[1])
 
-    if frontiers:
-        # Prefer frontier that is far from drone AND near map boundary (push exploration outward)
+    if unexplored:
         best = None
         best_score = -1.0
-        for (mx, my) in frontiers:
+        for (mx, my) in unexplored:
             x, y = map_to_world(mx, my)
             if abs(x) > MAP_BOUND or abs(y) > MAP_BOUND:
                 continue
             dist_from_drone = (mx - drone_mx) ** 2 + (my - drone_my) ** 2
-            # Bonus for being in outer area (beyond central box)
             dist_from_center = max(abs(x), abs(y))
             boundary_bonus = 2.0 * dist_from_center if dist_from_center >= BOUNDARY_BIAS else 0.0
-            score = dist_from_drone + boundary_bonus * 50  # strong pull toward boundary
+            score = dist_from_drone + boundary_bonus * 50
             if score > best_score:
                 best_score = score
                 best = np.array([x, y], dtype=float)
         if best is not None:
             return best
 
-    # Fallback: pick unknown cell farthest from drone (pull toward unexplored outer space)
+    # Fallback: pick random unknown cell
     candidates = []
     for _ in range(400):
         x = np.random.uniform(-MAP_BOUND, MAP_BOUND)
@@ -238,7 +278,7 @@ def compute_avoidance_force(x, y, influence_radius=0.15):
     return np.array([fx, fy], dtype=float)
 
 
-def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=3.0):
+def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=1.5):
     """Simulate a 2D lidar using PyBullet raycasts and update the occupancy map.
 
     Rays are cast in the horizontal plane. Free space along each ray is marked 128;
@@ -315,7 +355,7 @@ action = np.zeros((NUM_DRONES,4))
 
 # ----- Autonomous exploration with SLAM -----
 cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
-MAX_CMD_STEP = 0.03   # max (x,y) change per control step
+MAX_CMD_STEP = 5.0   # max (x,y) change per control step; larger = faster flight (~4.8 m/s at 48 Hz)
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
 goal_step_counter = 0
