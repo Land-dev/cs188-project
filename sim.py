@@ -260,7 +260,7 @@ def compute_avoidance_force(x, y, influence_radius=0.15):
     return np.array([fx, fy], dtype=float)
 
 
-def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=1.0):
+def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=2.0):
     """Simulate a 2D lidar using PyBullet raycasts and update the occupancy map.
 
     Rays are cast in the horizontal plane. Free space along each ray is marked 128.
@@ -407,10 +407,7 @@ PYB_CLIENT = env.getPyBulletClient()
 create_maze(PYB_CLIENT)
 spawn_fire(PYB_CLIENT)
 ctrl = [DSLPIDControl(drone_model=DRONE) for _ in range(NUM_DRONES)]
-# Softer position gains for stability (less overshoot, more damping)
-for c in ctrl:
-    c.P_COEFF_FOR = np.array([0.25, 0.25, 1.0])
-    c.D_COEFF_FOR = np.array([0.35, 0.35, 0.6])
+
 action = np.zeros((NUM_DRONES,4))
 
 # ----- Autonomous exploration with SLAM -----
@@ -434,7 +431,7 @@ try:
         # ----- Lidar-based SLAM: cast rays, update occupancy, and detect fire -----
         fire_hit = simulate_lidar(PYB_CLIENT, drone_pos)
         if fire_hit is not None and fire_goal_xy is None:
-            fire_goal_xy = fire_hit[:2]
+            fire_goal_xy = FIRE_POS[:2]
 
         # ----- Choose / update exploration goal and path (fire has priority) -----
         if fire_goal_xy is not None and not fire_reached:
@@ -526,3 +523,4 @@ finally:
     plt.title("Occupancy Map")
     plt.savefig("occupancy_map.png", dpi=150, bbox_inches="tight")
     plt.show()
+
