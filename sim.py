@@ -118,31 +118,10 @@ def create_maze(py_client):
 # Map = 6×6 box (world ±3 m); MAP_BOUND keeps goals inside
 MAP_BOUND = MAP_SIZE / 2.0 - MAP_RES
 GOAL_REACHED_DIST = 0.3
-MAX_GOAL_STEPS = 25   # seconds; allow time to reach goals outside center
 FRONTIER_MIN_NEIGHBORS = 2  # min unknown neighbors to count as frontier
 PATH_WAYPOINT_DIST = 0.3   # consider waypoint reached when within this
 BOUNDARY_BIAS = 1.5   # prefer goals with |x| or |y| >= this (explore outer area)
 REPLAN_AVOID_THRESHOLD = 2.0   # replan path when avoidance force magnitude exceeds this
-
-
-def get_frontiers():
-    """Return list of (mx, my) map indices that are frontier cells (free with unknown neighbors)."""
-    frontiers = []
-    for mx in range(1, MAP_DIM - 1):
-        for my in range(1, MAP_DIM - 1):
-            if occupancy_map[mx, my] != 128:
-                continue  # not free
-            unknown = 0
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    if dx == 0 and dy == 0:
-                        continue
-                    if occupancy_map[mx + dx, my + dy] == 0:
-                        unknown += 1
-            if unknown >= FRONTIER_MIN_NEIGHBORS:
-                frontiers.append((mx, my))
-    return frontiers
-
 
 def get_frontier_unknown_cells():
     """Return unknown cells (0) that border free space (128) — candidates for exploration goals."""
@@ -358,8 +337,6 @@ cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
 MAX_CMD_STEP = 5.0   # max (x,y) change per control step; larger = faster flight (~4.8 m/s at 48 Hz)
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
-goal_step_counter = 0
-max_goal_steps_ctrl = int(MAX_GOAL_STEPS * CTRL_FREQ)
 
 START = time.time()
 try:
@@ -373,13 +350,11 @@ try:
         if goal_xy is None:
             goal_xy = sample_exploration_goal(drone_pos[:2])
             path = plan_path(drone_pos[:2], goal_xy)
-            goal_step_counter = 0
 
         dist_to_goal = np.linalg.norm(drone_pos[:2] - goal_xy)
         if dist_to_goal < GOAL_REACHED_DIST:
             goal_xy = sample_exploration_goal(drone_pos[:2])
             path = plan_path(drone_pos[:2], goal_xy)
-            goal_step_counter = 0
 
         # If repelled from wall, replan path from current position to goal
         avoid = compute_avoidance_force(drone_pos[0], drone_pos[1])
@@ -422,7 +397,6 @@ try:
             target_pos=target_pos,
             target_rpy=INIT_RPYS[0, :]
         )
-        goal_step_counter += 1
 
         # ----- Lidar-based SLAM: cast rays and update occupancy -----
         simulate_lidar(PYB_CLIENT, drone_pos)
