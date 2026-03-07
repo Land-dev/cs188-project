@@ -260,7 +260,7 @@ def compute_avoidance_force(x, y, influence_radius=0.15):
     return np.array([fx, fy], dtype=float)
 
 
-def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0):
+def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=1.0):
     """Simulate a 2D lidar using PyBullet raycasts and update the occupancy map.
 
     Rays are cast in the horizontal plane. Free space along each ray is marked 128.
@@ -346,8 +346,7 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0):
             mx, my = world_to_map(hit_pos[0], hit_pos[1])
             if is_fire_hit:
                 fire_hit_pos = hit_pos
-                if occupancy_map[mx, my] == 0:
-                    occupancy_map[mx, my] = 200  # special value for fire
+                occupancy_map[mx, my] = 200  # special value for fire
             else:
                 occupancy_map[mx, my] = 255  # regular obstacle
 
