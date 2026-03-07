@@ -29,6 +29,9 @@ MAP_RES = 0.1
 MAP_DIM = int(MAP_SIZE / MAP_RES)
 occupancy_map = np.zeros((MAP_DIM, MAP_DIM), dtype=np.uint8)
 
+FIRE_BODY_ID = None
+FIRE_POS = None  # world (x, y, z) of the fire object
+
 def world_to_map(x, y):
     mx = int((x + MAP_SIZE/2)/MAP_RES)
     my = int((y + MAP_SIZE/2)/MAP_RES)
@@ -257,13 +260,17 @@ def compute_avoidance_force(x, y, influence_radius=0.15):
     return np.array([fx, fy], dtype=float)
 
 
-def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=1.5):
+def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0):
     """Simulate a 2D lidar using PyBullet raycasts and update the occupancy map.
 
-    Rays are cast in the horizontal plane. Free space along each ray is marked 128;
-    the hit cell is marked 255 (obstacle). Ray start is offset from drone center so
-    the ray does not hit the drone body.
+    Rays are cast in the horizontal plane. Free space along each ray is marked 128.
+    Regular obstacles are marked 255, while fire cells are marked 200 (special but passable).
+
+    The fire is detected geometrically from its known position (FIRE_POS) without relying on its
+    collision shape, so the drone does not physically collide with it but lidar can still see it.
     """
+    global FIRE_POS
+
     base = np.array([drone_pos[0], drone_pos[1], drone_pos[2]], dtype=float)
     ray_from = []
     ray_to = []
@@ -278,9 +285,13 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=1.5):
         ray_to.append(end.tolist())
 
     results = p.rayTestBatch(ray_from, ray_to, physicsClientId=py_client)
+    fire_hit_pos = None
+    FIRE_DETECT_RADIUS = 0.15
 
     for k, res in enumerate(results):
-        hit_fraction = res[2]
+        # PyBullet hit information (used for regular obstacles)
+        hit_fraction_pb = res[2]
+
         start = np.array(ray_from[k], dtype=float)
         end = np.array(ray_to[k], dtype=float)
         ray_vec = end - start
@@ -288,24 +299,94 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=1.5):
         if ray_len < 1e-6:
             continue
 
-        traveled = ray_len * hit_fraction
+        # Determine if/where this ray intersects the fire disk in XY
+        use_fraction = hit_fraction_pb
+        is_fire_hit = False
+
+        if FIRE_POS is not None:
+            sx, sy = start[0], start[1]
+            ex, ey = end[0], end[1]
+            fx, fy = FIRE_POS[0], FIRE_POS[1]
+            vx = ex - sx
+            vy = ey - sy
+            a = vx * vx + vy * vy
+            if a > 1e-9:
+                dx = sx - fx
+                dy = sy - fy
+                b = 2.0 * (dx * vx + dy * vy)
+                c = dx * dx + dy * dy - FIRE_DETECT_RADIUS * FIRE_DETECT_RADIUS
+                disc = b * b - 4.0 * a * c
+                if disc >= 0.0:
+                    sqrt_disc = np.sqrt(disc)
+                    t1 = (-b - sqrt_disc) / (2.0 * a)
+                    t2 = (-b + sqrt_disc) / (2.0 * a)
+                    t_candidates = [t for t in (t1, t2) if 0.0 <= t <= 1.0]
+                    if t_candidates:
+                        t_fire = min(t_candidates)
+                        if t_fire < use_fraction:
+                            use_fraction = t_fire
+                            is_fire_hit = True
+
+        traveled = ray_len * use_fraction
         if traveled <= 0.0:
             continue
 
         # Step along ray at ~MAP_RES spacing; mark every cell as free (don't overwrite obstacles)
         num_steps = max(1, int(traveled / MAP_RES))
         for i in range(num_steps + 1):
-            t = (i / num_steps) * hit_fraction
+            t = (i / num_steps) * use_fraction
             pt = start + ray_vec * t
             mx, my = world_to_map(pt[0], pt[1])
             if occupancy_map[mx, my] != 255:
                 occupancy_map[mx, my] = 128  # free/observed
 
-        # Mark obstacle at hit point
-        if hit_fraction < 1.0:
-            hit_pos = start + ray_vec * hit_fraction
+        # Mark hit point (fire or regular obstacle)
+        if use_fraction < 1.0:
+            hit_pos = start + ray_vec * use_fraction
             mx, my = world_to_map(hit_pos[0], hit_pos[1])
-            occupancy_map[mx, my] = 255
+            if is_fire_hit:
+                fire_hit_pos = hit_pos
+                if occupancy_map[mx, my] == 0:
+                    occupancy_map[mx, my] = 200  # special value for fire
+            else:
+                occupancy_map[mx, my] = 255  # regular obstacle
+
+    return fire_hit_pos
+
+def spawn_fire(py_client):
+    """Spawn a random 'fire' cylinder inside the 6×6 box."""
+    global FIRE_BODY_ID, FIRE_POS
+
+    fire_height = 1.0
+    fire_radius = 0.12  # visual radius only; no physical collision
+    half_h = fire_height / 2.0
+    color = [1.0, 0.3, 0.0, 1.0]  # bright orange
+
+    # No collision shape: fire is purely visual so the drone cannot collide with it.
+    col = -1
+    vis = p.createVisualShape(
+        p.GEOM_CYLINDER,
+        radius=fire_radius,
+        length=fire_height,
+        rgbaColor=color,
+        physicsClientId=py_client,
+    )
+
+    # Sample until we get a point reasonably inside the box and not right on top of the start
+    while True:
+        fx = np.random.uniform(-MAP_BOUND * 0.8, MAP_BOUND * 0.8)
+        fy = np.random.uniform(-MAP_BOUND * 0.8, MAP_BOUND * 0.8)
+        if np.hypot(fx - INIT_XYZS[0, 0], fy - INIT_XYZS[0, 1]) < 0.5:
+            continue
+        FIRE_POS = np.array([fx, fy, half_h], dtype=float)
+        FIRE_BODY_ID = p.createMultiBody(
+            baseMass=0.0,
+            baseCollisionShapeIndex=col,
+            baseVisualShapeIndex=vis,
+            basePosition=FIRE_POS.tolist(),
+            physicsClientId=py_client,
+        )
+        break
 
 # ----- Create environment -----
 env = CtrlAviary(
@@ -325,6 +406,7 @@ env = CtrlAviary(
 
 PYB_CLIENT = env.getPyBulletClient()
 create_maze(PYB_CLIENT)
+spawn_fire(PYB_CLIENT)
 ctrl = [DSLPIDControl(drone_model=DRONE) for _ in range(NUM_DRONES)]
 # Softer position gains for stability (less overshoot, more damping)
 for c in ctrl:
@@ -337,6 +419,10 @@ cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
 MAX_CMD_STEP = 5.0   # max (x,y) change per control step; larger = faster flight (~4.8 m/s at 48 Hz)
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
+fire_goal_xy = None
+fire_reached = False
+fire_reached_steps = 0
+FIRE_SUCCESS_WAIT_STEPS = int(2.0 * CTRL_FREQ)  # wait ~2 seconds at fire before ending
 
 START = time.time()
 try:
@@ -346,15 +432,36 @@ try:
         # Current position
         drone_pos = obs[0][:3]
 
-        # ----- Choose / update exploration goal and path (only when no goal or goal reached) -----
-        if goal_xy is None:
-            goal_xy = sample_exploration_goal(drone_pos[:2])
-            path = plan_path(drone_pos[:2], goal_xy)
+        # ----- Lidar-based SLAM: cast rays, update occupancy, and detect fire -----
+        fire_hit = simulate_lidar(PYB_CLIENT, drone_pos)
+        if fire_hit is not None and fire_goal_xy is None:
+            fire_goal_xy = fire_hit[:2]
+
+        # ----- Choose / update exploration goal and path (fire has priority) -----
+        if fire_goal_xy is not None and not fire_reached:
+            desired_goal = fire_goal_xy
+        else:
+            desired_goal = goal_xy
+
+        if desired_goal is None:
+            desired_goal = sample_exploration_goal(drone_pos[:2])
+            path = plan_path(drone_pos[:2], desired_goal)
+
+        goal_xy = desired_goal
 
         dist_to_goal = np.linalg.norm(drone_pos[:2] - goal_xy)
         if dist_to_goal < GOAL_REACHED_DIST:
-            goal_xy = sample_exploration_goal(drone_pos[:2])
-            path = plan_path(drone_pos[:2], goal_xy)
+            # If this goal was the fire, mark it reached
+            if fire_goal_xy is not None and not fire_reached:
+                if np.linalg.norm(drone_pos[:2] - fire_goal_xy) < GOAL_REACHED_DIST:
+                    fire_reached = True
+            if fire_reached:
+                # Loiter at fire once reached
+                goal_xy = fire_goal_xy
+                path = []
+            else:
+                goal_xy = sample_exploration_goal(drone_pos[:2])
+                path = plan_path(drone_pos[:2], goal_xy)
 
         # If repelled from wall, replan path from current position to goal
         avoid = compute_avoidance_force(drone_pos[0], drone_pos[1])
@@ -398,8 +505,12 @@ try:
             target_rpy=INIT_RPYS[0, :]
         )
 
-        # ----- Lidar-based SLAM: cast rays and update occupancy -----
-        simulate_lidar(PYB_CLIENT, drone_pos)
+        # If we have reached the fire, loiter for a couple seconds then end with success
+        if fire_reached:
+            fire_reached_steps += 1
+            if fire_reached_steps >= FIRE_SUCCESS_WAIT_STEPS:
+                print("SUCCESS: Drone reached the fire and loitered for a few seconds. Ending simulation.")
+                break
 
         # ----- Render and sync -----
         env.render()
