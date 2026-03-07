@@ -93,6 +93,19 @@ def create_maze(py_client):
         (-0.8, -1.5),
         (1.8, 1.5),
         (-1.8, 0.0),
+        # Additional pillars
+        (0.6, 0.8),
+        (-0.6, -0.9),
+        (1.0, 0.4),
+        (-1.2, 0.6),
+        (0.0, -1.8),
+        (2.2, 0.0),
+        (-2.2, -1.2),
+        (0.9, -1.2),
+        (-1.5, -0.5),
+        (1.4, 0.9),
+        (-0.3, 1.8),
+        (2.0, -1.5),
     ]
     col_pillar = p.createCollisionShape(
         p.GEOM_CYLINDER,
@@ -412,7 +425,7 @@ action = np.zeros((NUM_DRONES,4))
 
 # ----- Autonomous exploration with SLAM -----
 cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
-MAX_CMD_STEP = 5.0   # max (x,y) change per control step; larger = faster flight (~4.8 m/s at 48 Hz)
+MAX_CMD_STEP = 1.0   # max (x,y) change per control step; larger = faster flight (~4.8 m/s at 48 Hz)
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
 fire_goal_xy = None
@@ -459,9 +472,9 @@ try:
                 goal_xy = sample_exploration_goal(drone_pos[:2])
                 path = plan_path(drone_pos[:2], goal_xy)
 
-        # If repelled from wall, replan path from current position to goal
+        # Always account for newly mapped obstacles by replanning from current position
         avoid = compute_avoidance_force(drone_pos[0], drone_pos[1])
-        if np.linalg.norm(avoid) > REPLAN_AVOID_THRESHOLD and dist_to_goal > GOAL_REACHED_DIST:
+        if dist_to_goal > GOAL_REACHED_DIST:
             path = plan_path(drone_pos[:2], goal_xy)
 
         # Next waypoint: follow path if we have one, else aim at goal
