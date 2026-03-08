@@ -1,12 +1,13 @@
 import numpy as np
 import time
-import heapq
 import matplotlib.pyplot as plt
 import pybullet as p
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
 from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 from gym_pybullet_drones.utils.utils import sync
+
+from path_planning import world_to_map, map_to_world, plan_path
 
 # ----- Simulation parameters -----
 DRONE = DroneModel("cf2x")
@@ -31,17 +32,6 @@ occupancy_map = np.zeros((MAP_DIM, MAP_DIM), dtype=np.uint8)
 
 FIRE_BODY_ID = None
 FIRE_POS = None  # world (x, y, z) of the fire object
-
-def world_to_map(x, y):
-    mx = int((x + MAP_SIZE/2)/MAP_RES)
-    my = int((y + MAP_SIZE/2)/MAP_RES)
-    return np.clip(mx, 0, MAP_DIM-1), np.clip(my, 0, MAP_DIM-1)
-
-def map_to_world(mx, my):
-    """Convert map indices back to world (x, y) coordinates."""
-    x = (mx + 0.5) * MAP_RES - MAP_SIZE / 2.0
-    y = (my + 0.5) * MAP_RES - MAP_SIZE / 2.0
-    return x, y
 
 
 def create_maze(py_client):
@@ -159,13 +149,13 @@ def get_frontier_unknown_cells():
 def sample_exploration_goal(drone_xy):
     """Pick next goal in unexplored (unknown) space: prefer frontier-unknown cells, else random unknown."""
     unexplored = get_frontier_unknown_cells()  # unknown cells that border free space
-    drone_mx, drone_my = world_to_map(drone_xy[0], drone_xy[1])
+    drone_mx, drone_my = world_to_map(drone_xy[0], drone_xy[1], MAP_SIZE, MAP_RES)
 
     if unexplored:
         best = None
         best_score = -1.0
         for (mx, my) in unexplored:
-            x, y = map_to_world(mx, my)
+            x, y = map_to_world(mx, my, MAP_SIZE, MAP_RES)
             if abs(x) > MAP_BOUND or abs(y) > MAP_BOUND:
                 continue
             dist_from_drone = (mx - drone_mx) ** 2 + (my - drone_my) ** 2
@@ -183,7 +173,7 @@ def sample_exploration_goal(drone_xy):
     for _ in range(400):
         x = np.random.uniform(-MAP_BOUND, MAP_BOUND)
         y = np.random.uniform(-MAP_BOUND, MAP_BOUND)
-        mx, my = world_to_map(x, y)
+        mx, my = world_to_map(x, y, MAP_SIZE, MAP_RES)
         if occupancy_map[mx, my] == 0:
             d2 = (x - drone_xy[0]) ** 2 + (y - drone_xy[1]) ** 2
             boundary_bonus = 30.0 if max(abs(x), abs(y)) >= BOUNDARY_BIAS else 0.0
@@ -194,74 +184,16 @@ def sample_exploration_goal(drone_xy):
     return np.array([0.0, 0.0], dtype=float)
 
 
-def plan_path(start_xy, goal_xy):
-    """A* on occupancy grid. Passable = not obstacle (255). Returns list of world (x,y) waypoints."""
-    smx, smy = world_to_map(start_xy[0], start_xy[1])
-    gmx, gmy = world_to_map(goal_xy[0], goal_xy[1])
-
-    def passable(mx, my):
-        if mx < 0 or mx >= MAP_DIM or my < 0 or my >= MAP_DIM:
-            return False
-        return occupancy_map[mx, my] != 255
-
-    if not passable(smx, smy) or not passable(gmx, gmy):
-        return []
-
-    # 8-neighbor moves
-    moves = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
-    heap = [(0.0, 0, smx, smy)]
-    cost_so_far = {(smx, smy): 0.0}
-    parent = {}
-
-    while heap:
-        _, _, cx, cy = heapq.heappop(heap)
-        if (cx, cy) == (gmx, gmy):
-            break
-        for dx, dy in moves:
-            nx, ny = cx + dx, cy + dy
-            if not passable(nx, ny):
-                continue
-            step = 1.414 if dx != 0 and dy != 0 else 1.0
-            new_cost = cost_so_far.get((cx, cy), np.inf) + step
-            if new_cost < cost_so_far.get((nx, ny), np.inf):
-                cost_so_far[(nx, ny)] = new_cost
-                parent[(nx, ny)] = (cx, cy)
-                h = np.hypot(nx - gmx, ny - gmy)
-                heapq.heappush(heap, (new_cost + h, 0, nx, ny))
-
-    if (gmx, gmy) not in parent and (gmx, gmy) != (smx, smy):
-        return []
-
-    # Reconstruct path (start to goal in map indices)
-    path_m = []
-    cur = (gmx, gmy)
-    while cur in parent:
-        path_m.append(cur)
-        cur = parent[cur]
-    path_m.reverse()
-
-    # Convert to world coords; subsample to avoid dense waypoints
-    path_w = []
-    step = max(1, len(path_m) // 25)
-    for j in range(0, len(path_m), step):
-        mx, my = path_m[j]
-        path_w.append(np.array(map_to_world(mx, my), dtype=float))
-    if path_m:
-        mx, my = path_m[-1]
-        path_w.append(np.array(map_to_world(mx, my), dtype=float))
-    return path_w
-
-
 def compute_avoidance_force(x, y, influence_radius=0.15):
     """Compute a simple repulsive force away from occupied cells (walls)."""
-    mx, my = world_to_map(x, y)
+    mx, my = world_to_map(x, y, MAP_SIZE, MAP_RES)
     max_offset = int(influence_radius / MAP_RES)
     fx = 0.0
     fy = 0.0
     for ix in range(max(0, mx - max_offset), min(MAP_DIM, mx + max_offset + 1)):
         for iy in range(max(0, my - max_offset), min(MAP_DIM, my + max_offset + 1)):
             if occupancy_map[ix, iy] == 255:  # wall/obstacle
-                cx, cy = map_to_world(ix, iy)
+                cx, cy = map_to_world(ix, iy, MAP_SIZE, MAP_RES)
                 dx = x - cx
                 dy = y - cy
                 d2 = dx * dx + dy * dy
@@ -273,7 +205,7 @@ def compute_avoidance_force(x, y, influence_radius=0.15):
     return np.array([fx, fy], dtype=float)
 
 
-def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=5.0):
+def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=2.0):
     """Simulate a 2D lidar using PyBullet raycasts and update the occupancy map.
 
     Rays are cast in the horizontal plane. Free space along each ray is marked 128.
@@ -349,14 +281,14 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=5.0):
         for i in range(num_steps + 1):
             t = (i / num_steps) * use_fraction
             pt = start + ray_vec * t
-            mx, my = world_to_map(pt[0], pt[1])
+            mx, my = world_to_map(pt[0], pt[1], MAP_SIZE, MAP_RES)
             if occupancy_map[mx, my] != 255:
                 occupancy_map[mx, my] = 128  # free/observed
 
         # Mark hit point (fire or regular obstacle)
         if use_fraction < 1.0:
             hit_pos = start + ray_vec * use_fraction
-            mx, my = world_to_map(hit_pos[0], hit_pos[1])
+            mx, my = world_to_map(hit_pos[0], hit_pos[1], MAP_SIZE, MAP_RES)
             if is_fire_hit:
                 fire_hit_pos = hit_pos
                 occupancy_map[mx, my] = 200  # special value for fire
@@ -421,14 +353,14 @@ create_maze(PYB_CLIENT)
 spawn_fire(PYB_CLIENT)
 ctrl = [DSLPIDControl(drone_model=DRONE) for _ in range(NUM_DRONES)]
 # Softer position gains for stability (less overshoot, more damping)
-for c in ctrl:
-    c.P_COEFF_FOR = np.array([0.25, 0.25, 1.0])
-    c.D_COEFF_FOR = np.array([0.35, 0.35, 0.6])
+# for c in ctrl:
+#     c.P_COEFF_FOR = np.array([0.25, 0.25, 1.0])
+#     c.D_COEFF_FOR = np.array([0.35, 0.35, 0.6])
 action = np.zeros((NUM_DRONES,4))
 
 # ----- Autonomous exploration with SLAM -----
 cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
-MAX_CMD_STEP = 1.0   # max (x,y) change per control step; larger = faster flight (~4.8 m/s at 48 Hz)
+MAX_CMD_STEP = 3.0   # max (x,y) change per control step; larger = faster flight (~4.8 m/s at 48 Hz)
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
 fire_goal_xy = None
@@ -447,7 +379,7 @@ try:
         # ----- Lidar-based SLAM: cast rays, update occupancy, and detect fire -----
         fire_hit = simulate_lidar(PYB_CLIENT, drone_pos)
         if fire_hit is not None and fire_goal_xy is None:
-            fire_goal_xy = fire_hit[:2]
+            fire_goal_xy = FIRE_POS[:2]
 
         # ----- Choose / update exploration goal and path (fire has priority) -----
         if fire_goal_xy is not None and not fire_reached:
@@ -457,7 +389,7 @@ try:
 
         if desired_goal is None:
             desired_goal = sample_exploration_goal(drone_pos[:2])
-            path = plan_path(drone_pos[:2], desired_goal)
+            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], desired_goal)
 
         goal_xy = desired_goal
 
@@ -473,12 +405,12 @@ try:
                 path = []
             else:
                 goal_xy = sample_exploration_goal(drone_pos[:2])
-                path = plan_path(drone_pos[:2], goal_xy)
+                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy)
 
         # Always account for newly mapped obstacles by replanning from current position
         avoid = compute_avoidance_force(drone_pos[0], drone_pos[1])
         if dist_to_goal > GOAL_REACHED_DIST:
-            path = plan_path(drone_pos[:2], goal_xy)
+            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy)
 
         # Next waypoint: follow path if we have one, else aim at goal
         if path:
@@ -492,7 +424,7 @@ try:
         else:
             target_xy = goal_xy.copy()
             if np.linalg.norm(drone_pos[:2] - goal_xy) > GOAL_REACHED_DIST:
-                path = plan_path(drone_pos[:2], goal_xy)
+                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy)
 
         # ----- Move toward target (waypoint or goal) with wall avoidance -----
         to_target = target_xy - cmd_xy
