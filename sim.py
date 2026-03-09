@@ -385,14 +385,16 @@ spawn_fire(PYB_CLIENT)
 print(f"Fire 1 spawned at ({FIRE_POS[0]:.2f}, {FIRE_POS[1]:.2f})")
 ctrl = [DSLPIDControl(drone_model=DRONE) for _ in range(NUM_DRONES)]
 # Softer position gains for stability (less overshoot, more damping)
-# for c in ctrl:
-#     c.P_COEFF_FOR = np.array([0.25, 0.25, 1.0])
-#     c.D_COEFF_FOR = np.array([0.35, 0.35, 0.6])
+for c in ctrl:
+    c.P_COEFF_FOR = np.array([0.25, 0.25, 1.0])
+    c.D_COEFF_FOR = np.array([0.35, 0.35, 0.6])
 action = np.zeros((NUM_DRONES,4))
 
 # ----- Autonomous exploration with SLAM -----
 cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
-MAX_CMD_STEP = 3.0   # max (x,y) change per control step; larger = faster flight (~4.8 m/s at 48 Hz)
+# MAX_CMD_STEP controls the speed of the setpoint trajectory.
+# 0.08m per step at 48Hz = ~3.8 m/s max setpoint velocity (PID + clamp keep it safe)
+MAX_CMD_STEP = 0.08
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
 fire_goal_xy = None
@@ -400,6 +402,8 @@ fire_reached = False
 fire_reached_steps = 0
 fires_extinguished = 0
 FIRE_SUCCESS_WAIT_STEPS = int(2.0 * CTRL_FREQ)  # hover ~2 seconds at fire to extinguish it
+REPLAN_INTERVAL = 24  # replan every N control steps (~0.5s), not every frame
+replan_counter = 0
 
 START = time.time()
 try:
@@ -409,10 +413,21 @@ try:
         # Current position
         drone_pos = obs[0][:3]
 
+        if i % (CTRL_FREQ * 2) == 0:
+            print(f"Step {i}, Time: {i/CTRL_FREQ:.1f}s, Fires: {fires_extinguished}/{TOTAL_FIRES}, "
+                  f"Path len: {len(path)}, Pos: ({drone_pos[0]:.2f}, {drone_pos[1]:.2f}), "
+                  f"Fire goal: {fire_goal_xy is not None}")
+            import sys
+            sys.stdout.flush()
+
         # ----- Lidar-based SLAM: cast rays, update occupancy, and detect fire -----
         fire_hit = simulate_lidar(PYB_CLIENT, drone_pos)
         if fire_hit is not None and fire_goal_xy is None:
-            fire_goal_xy = FIRE_POS[:2]
+            fire_goal_xy = FIRE_POS[:2].copy()
+            # Immediately replan to the fire
+            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], fire_goal_xy, safe_margin=0.25)
+            goal_xy = fire_goal_xy
+            print(f"  >> FIRE DETECTED at ({fire_goal_xy[0]:.2f}, {fire_goal_xy[1]:.2f}), planning path...")
 
         # ----- Choose / update exploration goal and path (fire has priority) -----
         if fire_goal_xy is not None and not fire_reached:
@@ -422,7 +437,7 @@ try:
 
         if desired_goal is None:
             desired_goal = sample_exploration_goal(drone_pos[:2])
-            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], desired_goal)
+            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], desired_goal, safe_margin=0.25)
 
         goal_xy = desired_goal
 
@@ -438,12 +453,13 @@ try:
                 path = []
             else:
                 goal_xy = sample_exploration_goal(drone_pos[:2])
-                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy)
+                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
 
-        # Always account for newly mapped obstacles by replanning from current position
-        avoid = compute_avoidance_force(drone_pos[0], drone_pos[1])
-        if dist_to_goal > GOAL_REACHED_DIST:
-            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy)
+        # Periodic replan to account for newly mapped obstacles (NOT every frame)
+        replan_counter += 1
+        if replan_counter >= REPLAN_INTERVAL and dist_to_goal > GOAL_REACHED_DIST and not fire_reached:
+            replan_counter = 0
+            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
 
         # Next waypoint: follow path if we have one, else aim at goal
         if path:
@@ -456,23 +472,27 @@ try:
                     target_xy = goal_xy.copy()
         else:
             target_xy = goal_xy.copy()
-            if np.linalg.norm(drone_pos[:2] - goal_xy) > GOAL_REACHED_DIST:
-                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy)
+            if np.linalg.norm(drone_pos[:2] - goal_xy) > GOAL_REACHED_DIST and not fire_reached:
+                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
 
-        # ----- Move toward target (waypoint or goal) with wall avoidance -----
+        # ----- Move toward target (waypoint or goal) -----
         to_target = target_xy - cmd_xy
-        direction = to_target
-        if np.linalg.norm(avoid) > 1e-4:
-            direction = direction + 0.15 * avoid
-        norm_dir = np.linalg.norm(direction)
+        norm_dir = np.linalg.norm(to_target)
         if norm_dir > 1e-6:
-            step_vec = direction / norm_dir * MAX_CMD_STEP
+            step_vec = to_target / norm_dir * MAX_CMD_STEP
         else:
             step_vec = np.zeros(2, dtype=float)
+
         if np.linalg.norm(step_vec) > np.linalg.norm(to_target):
             cmd_xy = target_xy.copy()
         else:
             cmd_xy += step_vec
+
+        # Prevent runaway acceleration by clamping cmd_xy to stay within 0.4m of the physical drone.
+        max_err = 0.4
+        pos_err = cmd_xy - drone_pos[:2]
+        if np.linalg.norm(pos_err) > max_err:
+            cmd_xy = drone_pos[:2] + pos_err / np.linalg.norm(pos_err) * max_err
 
         target_pos = np.array([cmd_xy[0], cmd_xy[1], FLIGHT_HEIGHT])
         action[0, :], _, _ = ctrl[0].computeControlFromState(
@@ -536,12 +556,10 @@ finally:
     ax.imshow(display.T, origin="lower", cmap=cmap_custom, vmin=0, vmax=3)
 
     for idx, (fx, fy) in enumerate(EXTINGUISHED_FIRE_XY):
-        mx, my = world_to_map(fx, fy)
+        mx, my = world_to_map(fx, fy, MAP_SIZE, MAP_RES)
         ax.plot(mx, my, marker='*', color='red', markersize=14,
                 markeredgecolor='yellow', markeredgewidth=0.8)
         ax.annotate(f"Fire {idx+1}", (mx, my), textcoords="offset points",
                     xytext=(6, 6), fontsize=8, color='red', fontweight='bold')
 
-    ax.set_title(f"Occupancy Map  —  {fires_extinguished}/{TOTAL_FIRES} fires extinguished")
-    plt.savefig("occupancy_map.png", dpi=150, bbox_inches="tight")
     plt.show()
