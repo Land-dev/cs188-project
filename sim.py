@@ -1,6 +1,8 @@
 import numpy as np
 import time
-import matplotlib.pyplot as plt
+import sys
+import os
+import matplotlib
 import pybullet as p
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
@@ -9,11 +11,20 @@ from gym_pybullet_drones.utils.utils import sync
 
 from path_planning import world_to_map, map_to_world, plan_path
 
+# Support --headless flag and SIM_SEED env variable for batch testing
+HEADLESS = "--headless" in sys.argv
+if HEADLESS:
+    matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+if "SIM_SEED" in os.environ:
+    np.random.seed(int(os.environ["SIM_SEED"]))
+
 # ----- Simulation parameters -----
 DRONE = DroneModel("cf2x")
 NUM_DRONES = 1
 PHYSICS = Physics("pyb")
-GUI = True
+GUI = not HEADLESS
 OBSTACLES = False  # Disable built-in random obstacles; we'll spawn a custom maze
 SIM_FREQ = 240   # Higher sim freq for smoother physics (was 120)
 CTRL_FREQ = 48   # Higher control freq for more stable response (was 24)
@@ -562,4 +573,5 @@ finally:
         ax.annotate(f"Fire {idx+1}", (mx, my), textcoords="offset points",
                     xytext=(6, 6), fontsize=8, color='red', fontweight='bold')
 
-    plt.show()
+    if not HEADLESS:
+        plt.show()

@@ -1,37 +1,78 @@
 # Drone Simulation Project
 
-## Setup
+A PyBullet-based drone simulation where an autonomous Crazyflie 2.x explores a maze, detects fires via simulated lidar, and navigates to extinguish them — all while avoiding obstacles.
 
-### 1. Clone this repository
+## Quick Start
 
 ```bash
 git clone https://github.com/Land-dev/cs188-project.git
 cd cs188-project
-```
-
-### 2. Run the install script
-
-The script handles everything: cloning [gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones) into the correct subfolder, creating the `drones` conda environment, patching and building pybullet from source (required on macOS Apple Silicon — see [Known Issues](#known-issues) below), and installing all remaining dependencies.
-
-```bash
-chmod +x install.sh
-./install.sh
-```
-
-> **Prerequisites:** [conda](https://docs.conda.io/en/latest/miniconda.html) must be installed and available on your PATH.
-
-### 3. Run the simulation
-
-```bash
+chmod +x install.sh && ./install.sh
 conda activate drones
 python sim.py
 ```
 
+> **Prerequisites:** [conda](https://docs.conda.io/en/latest/miniconda.html) must be installed and available on your PATH.
+
+## How It Works
+
+1. **SLAM Exploration** — The drone casts 144 lidar rays to build an occupancy map (unknown → free/obstacle/fire) while flying frontier-based exploration goals.
+2. **Fire Detection** — When lidar intersects a fire cylinder, the drone immediately replans a path to the fire.
+3. **A\* Path Planning with Obstacle Inflation** — Paths are planned on the occupancy grid using A\* with a configurable safe margin (`safe_margin=0.25m`). Obstacles are inflated using `scipy.ndimage.binary_dilation` to keep the drone a safe distance from walls and pillars.
+4. **Smooth PID Control** — A position-error clamp and tuned step size prevent aggressive maneuvers that could destabilize the drone.
+5. **Multi-Fire** — After extinguishing a fire (hover for 2s), a new fire spawns randomly. The simulation ends when all fires are out (default: 3).
+
+## Project Structure
+
+| File | Description |
+|---|---|
+| `sim.py` | Main simulation loop — environment setup, SLAM, control, fire logic |
+| `path_planning.py` | A\* planner with scipy-based obstacle inflation (soft cost margins) |
+| `test_path_planning.py` | Unit tests for path planning (obstacle avoidance, fire reachability) |
+| `run_batch.py` | Batch runner — runs N headless sims in parallel, reports success rate |
+| `install.sh` | One-command setup: conda env, pybullet patch, dependencies |
+
+## Running Tests
+
+```bash
+conda activate drones
+python -m pytest test_path_planning.py -v
+```
+
+## Batch Testing
+
+Run 10 headless simulations in parallel to measure reliability:
+
+```bash
+conda activate drones
+python run_batch.py
+```
+
+**Latest result: 10/10 (100%) success rate, average 45s per run.**
+
+## CLI Flags
+
+| Flag | Description |
+|---|---|
+| `--headless` | Run without GUI (for batch testing / CI) |
+
+Environment variable `SIM_SEED` sets the random seed for reproducible runs.
+
 ---
+
+## Setup Details
+
+### Install Script
+
+The `install.sh` script handles:
+- Cloning [gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones)
+- Creating the `drones` conda environment
+- Patching and building pybullet from source (required on macOS Apple Silicon)
+- Installing all remaining dependencies
 
 ## Known Issues
 
-The two issues below affect **macOS Apple Silicon (M1/M2/M3)** users and are both handled automatically by `install.sh`. They are documented here so you understand what the script does and can fix things manually if needed.
+The two issues below affect **macOS Apple Silicon (M1/M2/M3)** users and are both handled automatically by `install.sh`.
 
 ---
 
@@ -42,40 +83,24 @@ The two issues below affect **macOS Apple Silicon (M1/M2/M3)** users and are bot
 ```
 error: command '/usr/bin/clang' failed with exit code 1
 ERROR: Failed building wheel for pybullet
-× Failed to build installable wheels for some pyproject.toml based projects
-╰─> pybullet
 ```
 
-The verbose error points to `_stdio.h:318: error: expected identifier or '('`.
-
-**Root cause:** pybullet has no pre-built ARM64 wheel on PyPI and must compile from source. Its bundled zlib (`examples/ThirdPartyLibs/zlib/zutil.h`) defines:
-
-```c
-#define fdopen(fd, mode) NULL   /* No fdopen() */
-```
-
-whenever `TARGET_OS_MAC` is set — which is always true on macOS. This macro then clobbers the system `fdopen()` declaration in macOS 15's `_stdio.h`, causing clang to fail parsing the header.
+**Root cause:** pybullet's bundled zlib defines `#define fdopen(fd, mode) NULL` whenever `TARGET_OS_MAC` is set, which clobbers the system `fdopen()` declaration on macOS 15.
 
 **Manual fix:** Download the source, apply the `__APPLE__` guard, and install from the patched copy:
 
 ```bash
 conda activate drones
 mkdir /tmp/pybullet_patch && cd /tmp/pybullet_patch
-
 pip download pybullet==3.2.6 --no-deps --no-binary :all: -d .
-tar xzf pybullet-3.2.6.tar.gz
-cd pybullet-3.2.6
-
-# Guard the macro so it is skipped on macOS (which always has fdopen)
+tar xzf pybullet-3.2.6.tar.gz && cd pybullet-3.2.6
 python - examples/ThirdPartyLibs/zlib/zutil.h <<'EOF'
-import sys
-path = sys.argv[1]
+import sys; path = sys.argv[1]
 with open(path) as f: src = f.read()
 old = '#define fdopen(fd, mode) NULL /* No fdopen() */'
 new = '#if !defined(__APPLE__)\n#define fdopen(fd, mode) NULL /* No fdopen() */\n#endif'
 open(path, 'w').write(src.replace(old, new))
 EOF
-
 pip install .
 ```
 
@@ -91,15 +116,7 @@ pip install numpy scipy transforms3d matplotlib pytest gymnasium "stable-baselin
 
 ### Issue 2: `No module named 'pkg_resources'`
 
-**How to identify it:** When running `python sim.py`:
-
-```
-ModuleNotFoundError: No module named 'pkg_resources'
-```
-
-Note: `pip install pkg_resources` will **not** work — it is not a standalone PyPI package.
-
-**Root cause:** `pkg_resources` is part of `setuptools`. In `setuptools` 82+, it was removed as a top-level importable module. `gym-pybullet-drones`'s `BaseAviary.py` still uses `import pkg_resources`, so it breaks with the newer version.
+**Root cause:** `pkg_resources` is part of `setuptools`. In `setuptools` 82+, it was removed. `gym-pybullet-drones` still imports it.
 
 **Manual fix:**
 
@@ -107,11 +124,3 @@ Note: `pip install pkg_resources` will **not** work — it is not a standalone P
 conda activate drones
 pip install "setuptools<81" --force-reinstall
 ```
-
-Verify it works:
-
-```bash
-python -c "import pkg_resources; print('OK')"
-```
-
-A deprecation warning may appear — it is harmless.
