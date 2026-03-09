@@ -41,15 +41,10 @@ def _inflate_obstacles(occupancy_map, map_res, safe_margin, goal_cell=None):
             if dx * dx + dy * dy <= inflation_cells * inflation_cells:
                 struct[dx + inflation_cells, dy + inflation_cells] = True
 
-    # Build obstacle mask (255 = wall, 200 = fire treated as obstacle for inflation)
-    obstacle_mask = (occupancy_map == 255) | (occupancy_map == 200)
-
-    # Exclude the goal cell from inflation if it's a fire
-    if goal_cell is not None:
-        gx, gy = goal_cell
-        if 0 <= gx < map_dim and 0 <= gy < map_dim:
-            if occupancy_map[gx, gy] == 200:
-                obstacle_mask[gx, gy] = False
+    # Only inflate real physical obstacles (255), NOT fire cells (200).
+    # Fire cells are handled by the passable() function in A*.
+    # Inflating fire creates a cost barrier that prevents the drone from reaching the fire.
+    obstacle_mask = (occupancy_map == 255)
 
     # Dilate
     inflated = binary_dilation(obstacle_mask, structure=struct)
@@ -76,14 +71,20 @@ def plan_path(occupancy_map, map_size, map_res, start_xy, goal_xy, safe_margin=0
     else:
         cost_map = None
 
+    # Check if the goal is a fire — if so, all fire cells should be passable
+    goal_is_fire = (0 <= gmx < map_dim and 0 <= gmy < map_dim and
+                    occupancy_map[gmx, gmy] == 200)
+
     def passable(mx, my):
         if mx < 0 or mx >= map_dim or my < 0 or my >= map_dim:
             return False
         val = occupancy_map[mx, my]
         if val == 255:
             return False
-        if val == 200:  # fire: only the goal cell is passable
-            return (mx, my) == (gmx, gmy)
+        if val == 200:
+            # If navigating to a fire, all fire cells are passable (lidar marks a cluster)
+            # If not navigating to a fire, fire cells block the path
+            return goal_is_fire
         return True
 
     if not passable(smx, smy) or not passable(gmx, gmy):
