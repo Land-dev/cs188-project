@@ -22,6 +22,27 @@ def map_to_world(mx, my, map_size, map_res):
     return x, y
 
 
+def path_hits_obstacle(occupancy_map, map_size, map_res, start_xy, path, goal_xy):
+    """
+    Check if the path from start through waypoints to goal crosses any obstacle (255).
+    Samples points along each segment at map resolution.
+    """
+    waypoints = [np.array(start_xy, dtype=float)] + [np.array(w, dtype=float) for w in path] + [np.array(goal_xy, dtype=float)]
+    for i in range(len(waypoints) - 1):
+        a, b = waypoints[i], waypoints[i + 1]
+        seg_len = np.linalg.norm(b - a)
+        if seg_len < 1e-6:
+            continue
+        num_steps = max(2, int(seg_len / map_res) + 1)
+        for j in range(num_steps + 1):
+            t = j / num_steps
+            pt = a + t * (b - a)
+            mx, my = world_to_map(pt[0], pt[1], map_size, map_res)
+            if occupancy_map[mx, my] == 255:
+                return True
+    return False
+
+
 def _inflate_obstacles(occupancy_map, map_res, safe_margin, goal_cell=None):
     """
     Create a cost map where cells near obstacles get a high penalty.

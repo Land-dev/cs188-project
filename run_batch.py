@@ -7,7 +7,7 @@ import sys
 import os
 
 N = 10
-PYTHON = "/Users/yash/miniforge3/envs/drones/bin/python3"
+PYTHON = sys.executable  # same interpreter as the one running this script
 SIM_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim.py")
 TIMEOUT = 300  # 5 min max per run
 

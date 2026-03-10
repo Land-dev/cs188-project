@@ -9,7 +9,7 @@ from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
 from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 from gym_pybullet_drones.utils.utils import sync
 
-from path_planning import world_to_map, map_to_world, plan_path
+from path_planning import world_to_map, map_to_world, plan_path, path_hits_obstacle
 
 # Support --headless flag and SIM_SEED env variable for batch testing
 HEADLESS = "--headless" in sys.argv
@@ -218,7 +218,7 @@ def compute_avoidance_force(x, y, influence_radius=0.15):
     return np.array([fx, fy], dtype=float)
 
 
-def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=2.0):
+def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0):
     """Simulate a 2D lidar using PyBullet raycasts and update the occupancy map.
 
     Rays are cast in the horizontal plane. Free space along each ray is marked 128.
@@ -396,16 +396,16 @@ spawn_fire(PYB_CLIENT)
 print(f"Fire 1 spawned at ({FIRE_POS[0]:.2f}, {FIRE_POS[1]:.2f})")
 ctrl = [DSLPIDControl(drone_model=DRONE) for _ in range(NUM_DRONES)]
 # Softer position gains for stability (less overshoot, more damping)
-for c in ctrl:
-    c.P_COEFF_FOR = np.array([0.25, 0.25, 1.0])
-    c.D_COEFF_FOR = np.array([0.35, 0.35, 0.6])
+# for c in ctrl:
+#     c.P_COEFF_FOR = np.array([0.25, 0.25, 1.0])
+#     c.D_COEFF_FOR = np.array([0.35, 0.35, 0.6])
 action = np.zeros((NUM_DRONES,4))
 
 # ----- Autonomous exploration with SLAM -----
 cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
 # MAX_CMD_STEP controls the speed of the setpoint trajectory.
-# 0.08m per step at 48Hz = ~3.8 m/s max setpoint velocity (PID + clamp keep it safe)
-MAX_CMD_STEP = 0.08
+# 0.15 m per step at 48 Hz = ~7.2 m/s max setpoint velocity
+MAX_CMD_STEP = 1.0
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
 fire_goal_xy = None
@@ -413,9 +413,6 @@ fire_reached = False
 fire_reached_steps = 0
 fires_extinguished = 0
 FIRE_SUCCESS_WAIT_STEPS = int(2.0 * CTRL_FREQ)  # hover ~2 seconds at fire to extinguish it
-REPLAN_INTERVAL = 24  # replan every N control steps (~0.5s), not every frame
-replan_counter = 0
-
 START = time.time()
 try:
     for i in range(int(DURATION_SEC*CTRL_FREQ)):
@@ -466,11 +463,10 @@ try:
                 goal_xy = sample_exploration_goal(drone_pos[:2])
                 path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
 
-        # Periodic replan to account for newly mapped obstacles (NOT every frame)
-        replan_counter += 1
-        if replan_counter >= REPLAN_INTERVAL and dist_to_goal > GOAL_REACHED_DIST and not fire_reached:
-            replan_counter = 0
-            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
+        # Replan only if current path would hit an obstacle (newly discovered)
+        if path and dist_to_goal > GOAL_REACHED_DIST and not fire_reached:
+            if path_hits_obstacle(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], path, goal_xy):
+                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
 
         # Next waypoint: follow path if we have one, else aim at goal
         if path:
@@ -499,11 +495,11 @@ try:
         else:
             cmd_xy += step_vec
 
-        # Prevent runaway acceleration by clamping cmd_xy to stay within 0.4m of the physical drone.
-        max_err = 0.4
-        pos_err = cmd_xy - drone_pos[:2]
-        if np.linalg.norm(pos_err) > max_err:
-            cmd_xy = drone_pos[:2] + pos_err / np.linalg.norm(pos_err) * max_err
+        # # Prevent runaway acceleration by clamping cmd_xy to stay within 0.4m of the physical drone.
+        # max_err = 0.5
+        # pos_err = cmd_xy - drone_pos[:2]
+        # if np.linalg.norm(pos_err) > max_err:
+        #     cmd_xy = drone_pos[:2] + pos_err / np.linalg.norm(pos_err) * max_err
 
         target_pos = np.array([cmd_xy[0], cmd_xy[1], FLIGHT_HEIGHT])
         action[0, :], _, _ = ctrl[0].computeControlFromState(
@@ -574,4 +570,5 @@ finally:
                     xytext=(6, 6), fontsize=8, color='red', fontweight='bold')
 
     if not HEADLESS:
+        plt.savefig("occupancy_map.png")
         plt.show()
