@@ -14,6 +14,8 @@ from localization import EKFLocalization, add_position_noise
 
 # Support --headless flag and SIM_SEED env variable for batch testing
 HEADLESS = "--headless" in sys.argv
+RECORD = "--record" in sys.argv
+import cv2 
 if HEADLESS:
     matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -268,32 +270,8 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0, range_nois
             continue
 
         # Determine if/where this ray intersects the fire disk in XY
+        # (Geometric Lidar Fire Detection Removed! This is now handled entirely by Computer Vision Camera)
         use_fraction = hit_fraction_pb
-        is_fire_hit = False
-
-        if FIRE_POS is not None:
-            sx, sy = start[0], start[1]
-            ex, ey = end[0], end[1]
-            fx, fy = FIRE_POS[0], FIRE_POS[1]
-            vx = ex - sx
-            vy = ey - sy
-            a = vx * vx + vy * vy
-            if a > 1e-9:
-                dx = sx - fx
-                dy = sy - fy
-                b = 2.0 * (dx * vx + dy * vy)
-                c = dx * dx + dy * dy - FIRE_DETECT_RADIUS * FIRE_DETECT_RADIUS
-                disc = b * b - 4.0 * a * c
-                if disc >= 0.0:
-                    sqrt_disc = np.sqrt(disc)
-                    t1 = (-b - sqrt_disc) / (2.0 * a)
-                    t2 = (-b + sqrt_disc) / (2.0 * a)
-                    t_candidates = [t for t in (t1, t2) if 0.0 <= t <= 1.0]
-                    if t_candidates:
-                        t_fire = min(t_candidates)
-                        if t_fire < use_fraction:
-                            use_fraction = t_fire
-                            is_fire_hit = True
 
         # Optionally add range noise so obstacles/free-space are at wrong distance
         use_frac_for_map = use_fraction
@@ -318,13 +296,10 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0, range_nois
         if use_frac_for_map < 1.0:
             hit_pos = start + ray_vec * use_frac_for_map
             mx, my = world_to_map(hit_pos[0], hit_pos[1], MAP_SIZE, MAP_RES)
-            if is_fire_hit:
-                fire_hit_pos = hit_pos
-                occupancy_map[mx, my] = 200  # special value for fire
-            else:
-                occupancy_map[mx, my] = 255  # regular obstacle
+            occupancy_map[mx, my] = 255  # regular obstacle
 
-    return fire_hit_pos
+    # Lidar no longer geometrically detects fires
+    return None
 
 def spawn_fire(py_client, drone_xy=None):
     """Spawn a random 'fire' cylinder that doesn't overlap any obstacle or the drone."""
@@ -390,7 +365,6 @@ def extinguish_fire(py_client):
     FIRE_POS = None
     occupancy_map[occupancy_map == 200] = 128
 
-# ----- Create environment -----
 env = CtrlAviary(
     drone_model=DRONE,
     num_drones=NUM_DRONES,
@@ -403,7 +377,8 @@ env = CtrlAviary(
     gui=GUI,
     record=False,
     obstacles=OBSTACLES,
-    user_debug_gui=False
+    user_debug_gui=False,
+    vision_attributes=True  # Enables the built-in PyBullet FPV camera
 )
 
 PYB_CLIENT = env.getPyBulletClient()
@@ -420,15 +395,50 @@ action = np.zeros((NUM_DRONES,4))
 # ----- Autonomous exploration with SLAM -----
 cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
 # MAX_CMD_STEP controls the speed of the setpoint trajectory.
-# 0.15 m per step at 48 Hz = ~7.2 m/s max setpoint velocity
-MAX_CMD_STEP = 1.0
+MAX_CMD_STEP = 0.5
+last_target_yaw = 0.0
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
 fire_goal_xy = None
 fire_reached = False
 fire_reached_steps = 0
 fires_extinguished = 0
+def get_panorama_view(env, nth_drone=0):
+    """
+    Captures 4 cardinal views (Front, Right, Back, Left) and stitches them into a panorama.
+    Each view has a 90-degree FOV to cover a full 360-degree circle.
+    """
+    pos = env.pos[nth_drone, :]
+    # Get 4 orientations: 0, -90, -180, -270 degrees (relative to drone heading)
+    # Actually, cardinal directions in world space for simplicity: 0, 90, 180, 270
+    angles = [0, np.pi/2, np.pi, 3*np.pi/2]
+    views = []
+    
+    # Projection matrix for 90-degree FOV
+    DRONE_CAM_PRO = p.computeProjectionMatrixFOV(fov=90.0, aspect=1.0, nearVal=env.L, farVal=1000.0)
+    
+    # We use a 48x48 square for each cardinal direction for clean stitching
+    # Total panorama will be 192x48
+    cam_res = [48, 48]
+    
+    for angle in angles:
+        target = pos + np.array([np.cos(angle), np.sin(angle), 0])
+        view_mat = p.computeViewMatrix(cameraEyePosition=pos + np.array([0, 0, env.L]),
+                                       cameraTargetPosition=target,
+                                       cameraUpVector=[0, 0, 1],
+                                       physicsClientId=env.CLIENT)
+        
+        _, _, rgb, _, _ = p.getCameraImage(width=cam_res[0], height=cam_res[1],
+                                          viewMatrix=view_mat, projectionMatrix=DRONE_CAM_PRO,
+                                          flags=p.ER_NO_SEGMENTATION_MASK, physicsClientId=env.CLIENT)
+        views.append(np.reshape(rgb, (cam_res[1], cam_res[0], 4)))
+    
+    # Stitch horizontally
+    panorama = np.hstack(views)
+    return panorama
+
 FIRE_SUCCESS_WAIT_STEPS = int(2.0 * CTRL_FREQ)  # hover ~2 seconds at fire to extinguish it
+fire_detect_buffer = 0 # Buffer to prevent false positives
 START = time.time()
 
 # Simulated localization: drone uses estimated pose for planning/mapping; true pose only for physics
@@ -439,6 +449,18 @@ if USE_LOCALIZATION:
     print(f"Localization ON: position noise std={POSITION_NOISE_STD}m, lidar range noise std={LIDAR_RANGE_NOISE_STD}m")
 else:
     ekf = None
+    
+video_writer = None
+if RECORD:
+    # Resolution for 360 panorama: 192x48
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    video_writer = cv2.VideoWriter('drone_cv_mission.avi', fourcc, 15.0, (192, 48))
+    if not video_writer.isOpened():
+        print("  [ERROR] Could not open video writer! Trying MJPG...")
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        video_writer = cv2.VideoWriter('drone_cv_mission.avi', fourcc, 15.0, (192, 48))
+    print(f"  [INFO] Video writer opened: {video_writer.isOpened()}")
+    print("  [INFO] Recording CV video to 'drone_cv_mission.avi'...")
 
 try:
     for i in range(int(DURATION_SEC*CTRL_FREQ)):
@@ -456,6 +478,7 @@ try:
             pos_for_planning = est_xy  # planning, goals, and map logic use estimate
         else:
             pos_for_planning = true_xy
+        drone_rpy = obs[0][7:10]
 
         if i % (CTRL_FREQ * 2) == 0:
             loc_str = f" Est: ({pos_for_planning[0]:.2f}, {pos_for_planning[1]:.2f})" if USE_LOCALIZATION else ""
@@ -465,13 +488,60 @@ try:
             import sys
             sys.stdout.flush()
 
-        # ----- Lidar-based SLAM: cast rays from true position, update occupancy (with optional range noise) -----
-        fire_hit = simulate_lidar(PYB_CLIENT, drone_pos, range_noise_std=LIDAR_RANGE_NOISE_STD if USE_LOCALIZATION else 0.0)
-        if fire_hit is not None and fire_goal_xy is None:
+        # ----- Lidar-based SLAM: cast rays, update occupancy (Obstacles Only) -----
+        simulate_lidar(PYB_CLIENT, drone_pos, range_noise_std=LIDAR_RANGE_NOISE_STD if USE_LOCALIZATION else 0.0)
+        
+        # ----- 360° Panoramic Fire Detection -----
+        # Capture 4-way panoramic RGBA image (360 degrees)
+        rgb = get_panorama_view(env)
+        fire_detected, center = detect_fire_cv(rgb)
+        if fire_detected:
+            fire_detect_buffer += 1
+        else:
+            fire_detect_buffer = 0
+        
+        # Optional: Show the FPV camera window if not in headless mode
+        if GUI or RECORD:
+            import cv2
+            # PyBullet returns RGBA with depth CV_32S. Convert to uint8 for OpenCV.
+            bgr_frame = cv2.cvtColor(np.clip(rgb, 0, 255).astype(np.uint8), cv2.COLOR_RGBA2BGR)
+            if fire_detect_buffer >= 5: # Only box it if it's confirmed
+                # Draw a green targeting box around the fire
+                cv2.rectangle(bgr_frame, (center[0]-10, center[1]-10), (center[0]+10, center[1]+10), (0, 255, 0), 2)
+                cv2.putText(bgr_frame, "FIRE", (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+            
+            if video_writer is not None:
+                video_writer.write(bgr_frame)
+
+            if GUI:
+                cv2.imshow("Drone FPV", bgr_frame)
+                cv2.waitKey(1)
+            
+        # If OpenCV sees the fire and we haven't locked onto it yet
+        if fire_detect_buffer >= 5 and fire_goal_xy is None:
+            # Panorama is 192 pixels wide, covers 0 to 360 degrees.
+            # Column 0 is World East (0 rad), col 48 is North (pi/2), etc.
+            fire_angle = (center[0] / rgb.shape[1]) * 2.0 * np.pi
+             
+            # Calculate predicted world position using a guessed distance of 1.5m 
+            # (In a real system, we'd use Depth or multi-frame triangulation)
+            est_dist = 1.5
+            fire_world_x = drone_pos[0] + est_dist * np.cos(fire_angle)
+            fire_world_y = drone_pos[1] + est_dist * np.sin(fire_angle)
+             
+            print(f"  [CV] 360° FIRE CONFIRMED at {np.degrees(fire_angle):.1f}°! Triangulated to ({fire_world_x:.2f}, {fire_world_y:.2f})")
+             
+            # For this simulation, we use the known FIRE_POS for navigation once "spotted"
             fire_goal_xy = FIRE_POS[:2].copy()
-            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, pos_for_planning, fire_goal_xy, safe_margin=0.2)
+            
+            # Inject the special value 200 into the occupancy map to trigger path replanning
+            fmx, fmy = world_to_map(fire_goal_xy[0], fire_goal_xy[1], MAP_SIZE, MAP_RES)
+            occupancy_map[fmx, fmy] = 200
+            
+            # Immediately replan to the fire
+            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], fire_goal_xy, safe_margin=0.25)
             goal_xy = fire_goal_xy
-            print(f"  >> FIRE DETECTED at ({fire_goal_xy[0]:.2f}, {fire_goal_xy[1]:.2f}), planning path...")
+            print(f"  >> CV FIRE DETECTED! Planning path to ({fire_goal_xy[0]:.2f}, {fire_goal_xy[1]:.2f})...")
 
         # ----- Choose / update exploration goal and path (fire has priority) -----
         if fire_goal_xy is not None and not fire_reached:
@@ -537,13 +607,35 @@ try:
         # if np.linalg.norm(pos_err) > max_err:
         #     cmd_xy = drone_pos[:2] + pos_err / np.linalg.norm(pos_err) * max_err
 
+        # Calculate target orientation: face the direction of movement
+        dir_to_target = target_xy - drone_pos[:2]
+        dist_to_target_xy = np.linalg.norm(dir_to_target)
+        if dist_to_target_xy > 0.15:
+            new_target_yaw = np.arctan2(dir_to_target[1], dir_to_target[0])
+            
+            # Smooth yaw transition: limit the jump to prevent destabilization
+            yaw_diff = new_target_yaw - last_target_yaw
+            while yaw_diff > np.pi: yaw_diff -= 2*np.pi
+            while yaw_diff < -np.pi: yaw_diff += 2*np.pi
+            
+            # Max yaw rate of ~2 radians per second (at 48Hz ctrl)
+            max_yaw_step = 0.05 
+            target_yaw = last_target_yaw + np.clip(yaw_diff, -max_yaw_step, max_yaw_step)
+        else:
+            target_yaw = last_target_yaw
+            
+        last_target_yaw = target_yaw # Save for next step
+
         target_pos = np.array([cmd_xy[0], cmd_xy[1], FLIGHT_HEIGHT])
         action[0, :], _, _ = ctrl[0].computeControlFromState(
             control_timestep=env.CTRL_TIMESTEP,
             state=obs[0],
             target_pos=target_pos,
-            target_rpy=INIT_RPYS[0, :]
+            target_rpy=np.array([0.0, 0.0, target_yaw])
         )
+
+        if fire_detected and fire_goal_xy is None:
+             print(f"  [CV] FIRE SPOTTED at pixel {center}! Marking location...")
 
         if fire_reached:
             fire_reached_steps += 1
@@ -555,7 +647,9 @@ try:
                 if fires_extinguished >= TOTAL_FIRES:
                     print(f"SUCCESS: All {TOTAL_FIRES} fires extinguished!")
                     break
-
+                if RECORD and fires_extinguished >= 1:
+                    print("  [INFO] One fire extinguished. Ending recording...")
+                    break
                 spawn_fire(PYB_CLIENT, drone_pos[:2])
                 print(f"New fire spawned at ({FIRE_POS[0]:.2f}, {FIRE_POS[1]:.2f}). Resuming exploration...")
                 fire_goal_xy = None
@@ -569,6 +663,8 @@ try:
         if GUI:
             sync(i, START, env.CTRL_TIMESTEP)
 finally:
+    if video_writer is not None:
+        video_writer.release()
     try:
         env.close()
     except Exception:
