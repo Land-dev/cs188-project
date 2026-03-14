@@ -13,6 +13,8 @@ from path_planning import world_to_map, map_to_world, plan_path, path_hits_obsta
 
 # Support --headless flag and SIM_SEED env variable for batch testing
 HEADLESS = "--headless" in sys.argv
+RECORD = "--record" in sys.argv
+import cv2 
 if HEADLESS:
     matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -422,6 +424,19 @@ def get_panorama_view(env, nth_drone=0):
 FIRE_SUCCESS_WAIT_STEPS = int(2.0 * CTRL_FREQ)  # hover ~2 seconds at fire to extinguish it
 fire_detect_buffer = 0 # Buffer to prevent false positives
 START = time.time()
+
+video_writer = None
+if RECORD:
+    # Resolution for 360 panorama: 192x48
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    video_writer = cv2.VideoWriter('drone_cv_mission.avi', fourcc, 15.0, (192, 48))
+    if not video_writer.isOpened():
+        print("  [ERROR] Could not open video writer! Trying MJPG...")
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        video_writer = cv2.VideoWriter('drone_cv_mission.avi', fourcc, 15.0, (192, 48))
+    print(f"  [INFO] Video writer opened: {video_writer.isOpened()}")
+    print("  [INFO] Recording CV video to 'drone_cv_mission.avi'...")
+
 try:
     for i in range(int(DURATION_SEC*CTRL_FREQ)):
         obs, _, _, _, _ = env.step(action)
@@ -450,7 +465,7 @@ try:
             fire_detect_buffer = 0
         
         # Optional: Show the FPV camera window if not in headless mode
-        if GUI:
+        if GUI or RECORD:
             import cv2
             # PyBullet returns RGBA with depth CV_32S. Convert to uint8 for OpenCV.
             bgr_frame = cv2.cvtColor(np.clip(rgb, 0, 255).astype(np.uint8), cv2.COLOR_RGBA2BGR)
@@ -458,8 +473,13 @@ try:
                 # Draw a green targeting box around the fire
                 cv2.rectangle(bgr_frame, (center[0]-10, center[1]-10), (center[0]+10, center[1]+10), (0, 255, 0), 2)
                 cv2.putText(bgr_frame, "FIRE", (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
-            cv2.imshow("Drone FPV", bgr_frame)
-            cv2.waitKey(1)
+            
+            if video_writer is not None:
+                video_writer.write(bgr_frame)
+
+            if GUI:
+                cv2.imshow("Drone FPV", bgr_frame)
+                cv2.waitKey(1)
             
         # If OpenCV sees the fire and we haven't locked onto it yet
         if fire_detect_buffer >= 5 and fire_goal_xy is None:
@@ -591,7 +611,9 @@ try:
                 if fires_extinguished >= TOTAL_FIRES:
                     print(f"SUCCESS: All {TOTAL_FIRES} fires extinguished!")
                     break
-
+                if RECORD and fires_extinguished >= 1:
+                    print("  [INFO] One fire extinguished. Ending recording...")
+                    break
                 spawn_fire(PYB_CLIENT, drone_pos[:2])
                 print(f"New fire spawned at ({FIRE_POS[0]:.2f}, {FIRE_POS[1]:.2f}). Resuming exploration...")
                 fire_goal_xy = None
@@ -605,6 +627,8 @@ try:
         if GUI:
             sync(i, START, env.CTRL_TIMESTEP)
 finally:
+    if video_writer is not None:
+        video_writer.release()
     try:
         env.close()
     except Exception:

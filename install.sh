@@ -87,7 +87,7 @@ echo ">>> Installing gym-pybullet-drones..."
 echo ">>> Installing remaining dependencies..."
 "$DRONES_PIP" install \
     numpy scipy transforms3d matplotlib pytest \
-    gymnasium "stable-baselines3>=2.0.0" control
+    gymnasium "stable-baselines3>=2.0.0" control opencv-python
 
 # ── 7. Pin setuptools to a version that still exposes pkg_resources ───────────
 #
