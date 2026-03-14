@@ -6,7 +6,7 @@ import re
 import sys
 import os
 
-N = 3
+N = 10
 PYTHON = sys.executable  # same interpreter as the one running this script
 SIM_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim.py")
 TIMEOUT = 300  # 5 min max per run

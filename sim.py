@@ -152,7 +152,7 @@ EKF_PROCESS_NOISE_SCALE = 1.0   # higher = more drift between position updates
 # p.getCameraImage is called 4× per panorama (one per cardinal direction).
 # Throttling to every Nth step reduces renders from 192/s to 192/N per second
 # of sim time with no detection impact (fire is stationary, visible for many frames).
-CV_EVERY_N = 6      # run panorama + CV every 6th control step (~8 Hz)
+CV_EVERY_N = 12     # run panorama + CV every 12th control step (~4 Hz)
 LIDAR_EVERY_N = 1   # run lidar every control step — raycasts are CPU-only (cheap),
                     # and stale maps from skipping steps can cause the drone to navigate
                     # into unmapped pillars before it can replan.
@@ -413,8 +413,8 @@ action = np.zeros((NUM_DRONES,4))
 
 # ----- Autonomous exploration with SLAM -----
 cmd_xy = np.array(INIT_XYZS[0, :2], dtype=float)
-# MAX_CMD_STEP controls the speed of the setpoint trajectory.
-MAX_CMD_STEP = 0.5
+# MAX_CMD_STEP is the max velocity in m/s for the setpoint trajectory.
+MAX_CMD_STEP = 0.8
 last_target_yaw = 0.0
 goal_xy = None
 path = []   # list of (x,y) waypoints from plan_path
@@ -434,6 +434,8 @@ def get_panorama_view(env, nth_drone=0):
     views = []
     
     # Projection matrix for 90-degree FOV
+    # Using ER_TINY_RENDERER (CPU software renderer) in headless mode for potentially faster performance
+    renderer = p.ER_TINY_RENDERER if HEADLESS else p.ER_BULLET_HARDWARE_OPENGL
     DRONE_CAM_PRO = p.computeProjectionMatrixFOV(fov=90.0, aspect=1.0, nearVal=env.L, farVal=1000.0)
     
     # We use a 48x48 square for each cardinal direction for clean stitching
@@ -449,7 +451,9 @@ def get_panorama_view(env, nth_drone=0):
         
         _, _, rgb, _, _ = p.getCameraImage(width=cam_res[0], height=cam_res[1],
                                           viewMatrix=view_mat, projectionMatrix=DRONE_CAM_PRO,
-                                          flags=p.ER_NO_SEGMENTATION_MASK, physicsClientId=env.CLIENT)
+                                          flags=p.ER_NO_SEGMENTATION_MASK,
+                                          renderer=renderer,
+                                          physicsClientId=env.CLIENT)
         views.append(np.reshape(rgb, (cam_res[1], cam_res[0], 4)))
     
     # Stitch horizontally
@@ -559,8 +563,8 @@ try:
                 goal_xy = fire_goal_xy
                 print(f"  >> CV FIRE DETECTED! Planning path to ({fire_goal_xy[0]:.2f}, {fire_goal_xy[1]:.2f})...")
 
-        # Write last panorama frame to video every step for smooth playback
-        if RECORD and video_writer is not None and last_bgr_frame is not None:
+        # Write last panorama frame to video only when updated (CV_EVERY_N)
+        if RECORD and video_writer is not None and i % CV_EVERY_N == 0 and last_bgr_frame is not None:
             video_writer.write(last_bgr_frame)
 
         # ----- Choose / update exploration goal and path (fire has priority) -----
@@ -616,16 +620,16 @@ try:
         else:
             step_vec = np.zeros(2, dtype=float)
 
-        if np.linalg.norm(step_vec) > np.linalg.norm(to_target):
+        if np.linalg.norm(step_vec) * (1.0 / CTRL_FREQ) > np.linalg.norm(to_target):
             cmd_xy = target_xy.copy()
         else:
-            cmd_xy += step_vec
+            cmd_xy += step_vec * (1.0 / CTRL_FREQ)
 
-        # # Prevent runaway acceleration by clamping cmd_xy to stay within 0.4m of the physical drone.
-        # max_err = 0.5
-        # pos_err = cmd_xy - drone_pos[:2]
-        # if np.linalg.norm(pos_err) > max_err:
-        #     cmd_xy = drone_pos[:2] + pos_err / np.linalg.norm(pos_err) * max_err
+        # Prevent runaway acceleration by clamping cmd_xy to stay within 0.5m of the physical drone.
+        max_err = 0.5
+        pos_err = cmd_xy - drone_pos[:2]
+        if np.linalg.norm(pos_err) > max_err:
+            cmd_xy = drone_pos[:2] + pos_err / np.linalg.norm(pos_err) * max_err
 
         # Calculate target orientation: face the direction of movement
         dir_to_target = target_xy - drone_pos[:2]
