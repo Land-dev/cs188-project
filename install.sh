@@ -79,17 +79,49 @@ PYEOF
 "$DRONES_PIP" install "$PYBULLET_BUILD_DIR/pybullet-3.2.6"
 rm -rf "$PYBULLET_BUILD_DIR"
 
-# ── 5. Install gym-pybullet-drones (without reinstalling pybullet) ────────────
+# ── 5. Patch CtrlAviary to expose vision_attributes ───────────────────────────
+#
+# The upstream CtrlAviary.__init__ dropped the vision_attributes parameter, but
+# sim.py passes vision_attributes=True when constructing CtrlAviary so that the
+# built-in PyBullet FPV camera is allocated via BaseAviary.  The patch below
+# adds the parameter back and forwards it to super().__init__().
+CTRL_AVIARY="$DRONES_DIR/gym_pybullet_drones/envs/CtrlAviary.py"
+echo ">>> Patching CtrlAviary to add vision_attributes parameter..."
+"$DRONES_PYTHON" - "$CTRL_AVIARY" <<'PYEOF'
+import sys, re
+
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+
+# Add vision_attributes=False to __init__ signature (before output_folder)
+src = src.replace(
+    "                 user_debug_gui=True,\n                 output_folder='results'",
+    "                 user_debug_gui=True,\n                 vision_attributes=False,\n                 output_folder='results'"
+)
+
+# Forward vision_attributes in the super().__init__() call (before output_folder)
+src = src.replace(
+    "                         user_debug_gui=user_debug_gui,\n                         output_folder=output_folder",
+    "                         user_debug_gui=user_debug_gui,\n                         vision_attributes=vision_attributes,\n                         output_folder=output_folder"
+)
+
+with open(path, 'w') as f:
+    f.write(src)
+print(f"  Patched {path}")
+PYEOF
+
+# ── 6. Install gym-pybullet-drones (without reinstalling pybullet) ────────────
 echo ">>> Installing gym-pybullet-drones..."
 "$DRONES_PIP" install -e "$DRONES_DIR" --no-deps
 
-# ── 6. Install remaining dependencies ─────────────────────────────────────────
+# ── 7. Install remaining dependencies ─────────────────────────────────────────
 echo ">>> Installing remaining dependencies..."
 "$DRONES_PIP" install \
     numpy scipy transforms3d matplotlib pytest \
     gymnasium "stable-baselines3>=2.0.0" control opencv-python
 
-# ── 7. Pin setuptools to a version that still exposes pkg_resources ───────────
+# ── 8. Pin setuptools to a version that still exposes pkg_resources ───────────
 #
 # setuptools 82+ removed pkg_resources as a top-level importable module.
 # gym-pybullet-drones's BaseAviary.py uses `import pkg_resources`, so we pin
