@@ -11,6 +11,7 @@ from gym_pybullet_drones.utils.utils import sync
 
 from path_planning import world_to_map, map_to_world, plan_path, path_hits_obstacle
 from localization import EKFLocalization, add_position_noise
+from vision import detect_fire_cv
 
 # Support --headless flag and SIM_SEED env variable for batch testing
 HEADLESS = "--headless" in sys.argv
@@ -29,7 +30,7 @@ NUM_DRONES = 1
 PHYSICS = Physics("pyb")
 GUI = not HEADLESS
 OBSTACLES = False  # Disable built-in random obstacles; we'll spawn a custom maze
-SIM_FREQ = 240   # Higher sim freq for smoother physics (was 120)
+SIM_FREQ = 4*240   # Higher sim freq for smoother physics (was 120)
 CTRL_FREQ = 48   # Higher control freq for more stable response (was 24)
 DURATION_SEC = 180  # longer run to allow extinguishing multiple fires
 TOTAL_FIRES = 3    # number of fires to extinguish before declaring success
@@ -500,22 +501,13 @@ try:
         else:
             fire_detect_buffer = 0
         
-        # Optional: Show the FPV camera window if not in headless mode
-        if GUI or RECORD:
-            import cv2
-            # PyBullet returns RGBA with depth CV_32S. Convert to uint8 for OpenCV.
+        # Write panorama to video file if recording (no cv2.imshow — conflicts with PyBullet GUI on macOS)
+        if RECORD and video_writer is not None:
             bgr_frame = cv2.cvtColor(np.clip(rgb, 0, 255).astype(np.uint8), cv2.COLOR_RGBA2BGR)
-            if fire_detect_buffer >= 5: # Only box it if it's confirmed
-                # Draw a green targeting box around the fire
+            if fire_detect_buffer >= 5 and center is not None:
                 cv2.rectangle(bgr_frame, (center[0]-10, center[1]-10), (center[0]+10, center[1]+10), (0, 255, 0), 2)
                 cv2.putText(bgr_frame, "FIRE", (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
-            
-            if video_writer is not None:
-                video_writer.write(bgr_frame)
-
-            if GUI:
-                cv2.imshow("Drone FPV", bgr_frame)
-                cv2.waitKey(1)
+            video_writer.write(bgr_frame)
             
         # If OpenCV sees the fire and we haven't locked onto it yet
         if fire_detect_buffer >= 5 and fire_goal_xy is None:
