@@ -259,7 +259,7 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0, range_nois
     base = np.array([drone_pos[0], drone_pos[1], drone_pos[2]], dtype=float)
     ray_from = []
     ray_to = []
-    ray_offset = 0.02  # start rays just outside drone body to avoid self-hit
+    ray_offset = 0.08  # start rays outside drone body to avoid self-hit (Crazyflie radius ~0.04m + margin)
     for k in range(num_rays):
         angle = 2.0 * np.pi * k / num_rays
         dx = np.cos(angle)
@@ -285,18 +285,19 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0, range_nois
             continue
 
         # Determine if/where this ray intersects the fire disk in XY
-        # (Geometric Lidar Fire Detection Removed! This is now handled entirely by Computer Vision Camera)
         use_fraction = hit_fraction_pb
 
-        # Optionally add range noise so obstacles/free-space are at wrong distance
+        # Only add range noise if there was an actual hit on a body
+        # Applying noise to a "miss" (fraction=1.0) creates phantom obstacles at max range
         use_frac_for_map = use_fraction
-        if range_noise_std > 0 and ray_len > 1e-6:
+        if range_noise_std > 0 and ray_len > 1e-6 and hit_fraction_pb < 1.0:
             range_noise = np.random.normal(0, range_noise_std)
-            use_frac_for_map = np.clip(use_fraction + range_noise / ray_len, 0.0, 1.0)
+            use_frac_for_map = np.clip(hit_fraction_pb + range_noise / ray_len, 0.0, 1.0)
 
         traveled = ray_len * use_frac_for_map
-        if traveled <= 0.0:
-            continue
+        if traveled <= 0.08: # Ignore hits too close to the drone (self-hits)
+            traveled = max_range
+            use_frac_for_map = 1.0
 
         # Step along ray at ~MAP_RES spacing; mark traversed cells as free.
         # Never overwrite confirmed obstacles (255) or CV-detected fire markers (200).
@@ -311,7 +312,7 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0, range_nois
 
         # Mark hit point as obstacle; preserve fire cells (200) so CV-detected fire
         # markers are not overwritten by noisy lidar hits near the fire location.
-        if use_frac_for_map < 1.0:
+        if use_frac_for_map < 1.0 and traveled > 0.08:
             hit_pos = start + ray_vec * use_frac_for_map
             mx, my = world_to_map(hit_pos[0], hit_pos[1], MAP_SIZE, MAP_RES)
             if occupancy_map[mx, my] != 200:
@@ -708,10 +709,12 @@ finally:
 
     total_cells = occupancy_map.size
     unknown_cells = int(np.count_nonzero(occupancy_map == 0))
-    observed_cells = total_cells - unknown_cells
     free_cells = int(np.count_nonzero(occupancy_map == 128))
     obstacle_cells = int(np.count_nonzero(occupancy_map == 255))
     fire_cells = int(np.count_nonzero(occupancy_map == 200))
+
+    # Observed cells are those that are not unknown (0)
+    observed_cells = total_cells - unknown_cells
     coverage_pct = 100.0 * observed_cells / total_cells
 
     print(f"\n  Map coverage       : {coverage_pct:.1f}%  ({observed_cells}/{total_cells} cells)")
@@ -719,7 +722,7 @@ finally:
     print(f"    Obstacle (255)   : {obstacle_cells}")
     print(f"    Fire (200)       : {fire_cells}")
     print(f"    Unknown (0)      : {unknown_cells}")
-    print(f"{'='*50}")
+    print(f"{'='*50}\n")
 
     vals, counts = np.unique(occupancy_map, return_counts=True)
     print("\nOccupancy map value distribution:")
