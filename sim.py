@@ -10,6 +10,7 @@ from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 from gym_pybullet_drones.utils.utils import sync
 
 from path_planning import world_to_map, map_to_world, plan_path, path_hits_obstacle
+from localization import EKFLocalization, add_position_noise
 
 # Support --headless flag and SIM_SEED env variable for batch testing
 HEADLESS = "--headless" in sys.argv
@@ -133,6 +134,12 @@ def create_maze(py_client):
         )
 
 
+# ----- Simulated localization (sensor noise + EKF) -----
+USE_LOCALIZATION = True   # If True, drone uses noisy position and EKF estimate for planning/mapping
+POSITION_NOISE_STD = 0.10   # meters, std of simulated position measurement (e.g. GPS)
+LIDAR_RANGE_NOISE_STD = 0.03   # meters, std of lidar range noise (0 = perfect lidar)
+EKF_PROCESS_NOISE_SCALE = 1.0   # higher = more drift between position updates
+
 # ----- Exploration parameters -----
 # Map = 6×6 box (world ±3 m); MAP_BOUND keeps goals inside
 MAP_BOUND = MAP_SIZE / 2.0 - MAP_RES
@@ -218,7 +225,7 @@ def compute_avoidance_force(x, y, influence_radius=0.15):
     return np.array([fx, fy], dtype=float)
 
 
-def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0):
+def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0, range_noise_std=0.0):
     """Simulate a 2D lidar using PyBullet raycasts and update the occupancy map.
 
     Rays are cast in the horizontal plane. Free space along each ray is marked 128.
@@ -226,6 +233,9 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0):
 
     The fire is detected geometrically from its known position (FIRE_POS) without relying on its
     collision shape, so the drone does not physically collide with it but lidar can still see it.
+
+    If range_noise_std > 0, hit distances are perturbed by Gaussian noise (meters), so obstacles
+    and free-space boundaries are placed at slightly wrong positions (simulated sensor noise).
     """
     global FIRE_POS
 
@@ -285,22 +295,28 @@ def simulate_lidar(py_client, drone_pos, num_rays=144, max_range=4.0):
                             use_fraction = t_fire
                             is_fire_hit = True
 
-        traveled = ray_len * use_fraction
+        # Optionally add range noise so obstacles/free-space are at wrong distance
+        use_frac_for_map = use_fraction
+        if range_noise_std > 0 and ray_len > 1e-6:
+            range_noise = np.random.normal(0, range_noise_std)
+            use_frac_for_map = np.clip(use_fraction + range_noise / ray_len, 0.0, 1.0)
+
+        traveled = ray_len * use_frac_for_map
         if traveled <= 0.0:
             continue
 
         # Step along ray at ~MAP_RES spacing; mark every cell as free (don't overwrite obstacles)
         num_steps = max(1, int(traveled / MAP_RES))
         for i in range(num_steps + 1):
-            t = (i / num_steps) * use_fraction
+            t = (i / num_steps) * use_frac_for_map
             pt = start + ray_vec * t
             mx, my = world_to_map(pt[0], pt[1], MAP_SIZE, MAP_RES)
             if occupancy_map[mx, my] != 255:
                 occupancy_map[mx, my] = 128  # free/observed
 
         # Mark hit point (fire or regular obstacle)
-        if use_fraction < 1.0:
-            hit_pos = start + ray_vec * use_fraction
+        if use_frac_for_map < 1.0:
+            hit_pos = start + ray_vec * use_frac_for_map
             mx, my = world_to_map(hit_pos[0], hit_pos[1], MAP_SIZE, MAP_RES)
             if is_fire_hit:
                 fire_hit_pos = hit_pos
@@ -414,26 +430,46 @@ fire_reached_steps = 0
 fires_extinguished = 0
 FIRE_SUCCESS_WAIT_STEPS = int(2.0 * CTRL_FREQ)  # hover ~2 seconds at fire to extinguish it
 START = time.time()
+
+# Simulated localization: drone uses estimated pose for planning/mapping; true pose only for physics
+if USE_LOCALIZATION:
+    noisy_xy = add_position_noise(INIT_XYZS[0, :2], std=POSITION_NOISE_STD)
+    ekf = EKFLocalization(noisy_xy, position_noise_std=POSITION_NOISE_STD, process_noise_scale=EKF_PROCESS_NOISE_SCALE)
+    ekf._dt = 1.0 / CTRL_FREQ
+    print(f"Localization ON: position noise std={POSITION_NOISE_STD}m, lidar range noise std={LIDAR_RANGE_NOISE_STD}m")
+else:
+    ekf = None
+
 try:
     for i in range(int(DURATION_SEC*CTRL_FREQ)):
         obs, _, _, _, _ = env.step(action)
 
-        # Current position
+        # True position (from physics); used for control and ray casting
         drone_pos = obs[0][:3]
+        true_xy = drone_pos[:2]
+
+        # Noisy position measurement and EKF update
+        if USE_LOCALIZATION:
+            noisy_xy = add_position_noise(true_xy, std=POSITION_NOISE_STD)
+            ekf.step(1.0 / CTRL_FREQ, noisy_xy)
+            est_xy = ekf.get_position()
+            pos_for_planning = est_xy  # planning, goals, and map logic use estimate
+        else:
+            pos_for_planning = true_xy
 
         if i % (CTRL_FREQ * 2) == 0:
+            loc_str = f" Est: ({pos_for_planning[0]:.2f}, {pos_for_planning[1]:.2f})" if USE_LOCALIZATION else ""
             print(f"Step {i}, Time: {i/CTRL_FREQ:.1f}s, Fires: {fires_extinguished}/{TOTAL_FIRES}, "
-                  f"Path len: {len(path)}, Pos: ({drone_pos[0]:.2f}, {drone_pos[1]:.2f}), "
+                  f"Path len: {len(path)}, Pos: ({drone_pos[0]:.2f}, {drone_pos[1]:.2f}){loc_str}, "
                   f"Fire goal: {fire_goal_xy is not None}")
             import sys
             sys.stdout.flush()
 
-        # ----- Lidar-based SLAM: cast rays, update occupancy, and detect fire -----
-        fire_hit = simulate_lidar(PYB_CLIENT, drone_pos)
+        # ----- Lidar-based SLAM: cast rays from true position, update occupancy (with optional range noise) -----
+        fire_hit = simulate_lidar(PYB_CLIENT, drone_pos, range_noise_std=LIDAR_RANGE_NOISE_STD if USE_LOCALIZATION else 0.0)
         if fire_hit is not None and fire_goal_xy is None:
             fire_goal_xy = FIRE_POS[:2].copy()
-            # Immediately replan to the fire
-            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], fire_goal_xy, safe_margin=0.25)
+            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, pos_for_planning, fire_goal_xy, safe_margin=0.2)
             goal_xy = fire_goal_xy
             print(f"  >> FIRE DETECTED at ({fire_goal_xy[0]:.2f}, {fire_goal_xy[1]:.2f}), planning path...")
 
@@ -444,34 +480,34 @@ try:
             desired_goal = goal_xy
 
         if desired_goal is None:
-            desired_goal = sample_exploration_goal(drone_pos[:2])
-            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], desired_goal, safe_margin=0.25)
+            desired_goal = sample_exploration_goal(pos_for_planning)
+            path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, pos_for_planning, desired_goal, safe_margin=0.2)
 
         goal_xy = desired_goal
 
-        dist_to_goal = np.linalg.norm(drone_pos[:2] - goal_xy)
-        if dist_to_goal < GOAL_REACHED_DIST:
-            # If this goal was the fire, mark it reached
+        # Goal reached and fire reached use TRUE position (physics)
+        dist_to_goal_est = np.linalg.norm(pos_for_planning - goal_xy)
+        dist_to_goal_true = np.linalg.norm(true_xy - goal_xy)
+        if dist_to_goal_true < GOAL_REACHED_DIST:
             if fire_goal_xy is not None and not fire_reached:
-                if np.linalg.norm(drone_pos[:2] - fire_goal_xy) < GOAL_REACHED_DIST:
+                if np.linalg.norm(true_xy - fire_goal_xy) < GOAL_REACHED_DIST:
                     fire_reached = True
             if fire_reached:
-                # Loiter at fire once reached
                 goal_xy = fire_goal_xy
                 path = []
             else:
-                goal_xy = sample_exploration_goal(drone_pos[:2])
-                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
+                goal_xy = sample_exploration_goal(pos_for_planning)
+                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, pos_for_planning, goal_xy, safe_margin=0.2)
 
-        # Replan only if current path would hit an obstacle (newly discovered)
-        if path and dist_to_goal > GOAL_REACHED_DIST and not fire_reached:
-            if path_hits_obstacle(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], path, goal_xy):
-                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
+        # Replan if path would hit obstacle (use estimated position for path check)
+        if path and dist_to_goal_est > GOAL_REACHED_DIST and not fire_reached:
+            if path_hits_obstacle(occupancy_map, MAP_SIZE, MAP_RES, pos_for_planning, path, goal_xy):
+                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, pos_for_planning, goal_xy, safe_margin=0.2)
 
-        # Next waypoint: follow path if we have one, else aim at goal
+        # Next waypoint: use estimated position for waypoint advancement
         if path:
             target_xy = path[0].copy()
-            if np.linalg.norm(drone_pos[:2] - path[0]) < PATH_WAYPOINT_DIST:
+            if np.linalg.norm(pos_for_planning - path[0]) < PATH_WAYPOINT_DIST:
                 path.pop(0)
                 if path:
                     target_xy = path[0].copy()
@@ -479,8 +515,8 @@ try:
                     target_xy = goal_xy.copy()
         else:
             target_xy = goal_xy.copy()
-            if np.linalg.norm(drone_pos[:2] - goal_xy) > GOAL_REACHED_DIST and not fire_reached:
-                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, drone_pos[:2], goal_xy, safe_margin=0.25)
+            if dist_to_goal_est > GOAL_REACHED_DIST and not fire_reached:
+                path = plan_path(occupancy_map, MAP_SIZE, MAP_RES, pos_for_planning, goal_xy, safe_margin=0.2)
 
         # ----- Move toward target (waypoint or goal) -----
         to_target = target_xy - cmd_xy
