@@ -41,6 +41,8 @@ def run_one(seed):
     else:
         ext, total = 0, 3
         status = "ERROR"
+        # Print the error so we can debug headless failures!
+        print(f"\n[Run {seed} Failed] Error output:\n{output[:1000]}")
     
     return (seed, ext, total, elapsed, status)
 
