@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from vision import detect_fire_cv
+from src.vision import detect_fire_cv
 
 def test_detect_fire_empty():
     """Test that a completely black image returns False."""

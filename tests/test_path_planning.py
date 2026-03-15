@@ -1,5 +1,5 @@
 import numpy as np
-from path_planning import plan_path, world_to_map, map_to_world
+from src.path_planning import plan_path, world_to_map, map_to_world
 
 def test_plan_path_without_inflation():
     """Test that path planning without safe margin grazes the obstacle."""

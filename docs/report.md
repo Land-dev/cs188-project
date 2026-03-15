@@ -50,13 +50,13 @@ The system was evaluated in the 6×6 indoor environment, spawning 3 consecutive 
 #### 1. Real-Time Mapping (Occupancy Grid)
 The system consistently generates an accurate 2D occupancy grid tracking obstacles, free space, map boundaries, and confirmed fire locations.
 <p align="center">
-  <img src="occupancy_map.png" width="600" />
+  <img src="../assets/occupancy_map.png" width="600" />
 </p>
 
 #### 2. Autonomous Navigation (CV Mission Demo)
 Smooth drone trajectories avoid all obstacles by utilizing A* with a 0.25m safe-margin inflation. The mission below showcases the 360° CV system detecting and localizing fires in real-time.
 <p align="center">
-  <img src="drone_cv_mission.gif" width="600" />
+  <img src="../assets/drone_cv_mission.gif" width="600" />
 </p>
 
 #### 3. Localization and Stability

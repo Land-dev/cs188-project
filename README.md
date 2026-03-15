@@ -3,7 +3,7 @@
 A PyBullet-based drone simulation where an autonomous Crazyflie 2.x quadrotor performs Simultaneous Localization and Mapping (SLAM) in a hazardous indoor environment. The drone explores unknown layouts, builds an occupancy grid map via LiDAR sensing, and utilizes a custom **360° Panoramic Computer Vision** stack to locate and extinguish fire sources.
 
 <p align="center">
-  <img src="drone_cv_mission.gif" width="700" alt="Drone Mission Demo" />
+  <img src="assets/drone_cv_mission.gif" width="700" alt="Drone Mission Demo" />
 </p>
 
 ## Project Overview
@@ -44,17 +44,16 @@ python sim.py
 
 ## Project Structure
 
-| File | Description |
+| Directory / File | Description |
 | :--- | :--- |
-| `sim.py` | Main simulation loop — environment setup, SLAM, control, fire logic, optional localization |
-| `localization.py` | EKF pose estimator and sensor noise (noisy position, optional lidar range noise) |
-| `path_planning.py` | A* planner with scipy-based obstacle inflation (soft cost margins) |
+| `sim.py` | Main simulation loop — environment setup, SLAM, control, fire logic |
 | `run_batch.py` | Batch runner — runs N headless sims in parallel, reports success rate |
+| `src/` | Core logic modules: `vision.py`, `path_planning.py`, `localization.py` |
+| `tests/` | Unit tests for CV and path planning |
+| `assets/` | Mission recording (GIF/MP4) and occupancy map assets |
+| `docs/` | Project documentation, including the final report |
+| `scripts/` | Utility scripts like `record_mission.sh` |
 | `install.sh` | One-command setup: conda env, pybullet patch, dependencies |
-| `vision.py` | Computer Vision module — HSV thresholding and contour detection logic |
-| `test_cv.py` | Unit tests for the Computer Vision fire detection system |
-| `test_path_planning.py` | Unit tests for navigation and obstacle avoidance logic |
-| `record_mission.sh` | Convenience script to record mission highlights (requires `ffmpeg`) |
 
 ## Running Tests
 
@@ -62,8 +61,8 @@ Verify the CV and navigation systems:
 
 ```bash
 conda activate drones
-python -m pytest test_cv.py -v
-python -m pytest test_path_planning.py -v
+python -m pytest tests/test_cv.py -v
+python -m pytest tests/test_path_planning.py -v
 ```
 
 ## Recording Missions
@@ -71,7 +70,7 @@ python -m pytest test_path_planning.py -v
 Capture a highlight of the drone's 360° CV feed:
 
 ```bash
-./record_mission.sh
+./scripts/record_mission.sh
 ```
 
 This generates a `drone_cv_mission.mp4` file showing the panoramic FPV feed used by the vision algorithm.

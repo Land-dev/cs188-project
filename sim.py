@@ -9,9 +9,9 @@ from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
 from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 from gym_pybullet_drones.utils.utils import sync
 
-from path_planning import world_to_map, map_to_world, plan_path, path_hits_obstacle
-from localization import EKFLocalization, add_position_noise
-from vision import detect_fire_cv
+from src.path_planning import world_to_map, map_to_world, plan_path, path_hits_obstacle
+from src.localization import EKFLocalization, add_position_noise
+from src.vision import detect_fire_cv
 
 # Support --headless flag and SIM_SEED env variable for batch testing
 HEADLESS = "--headless" in sys.argv
@@ -752,5 +752,5 @@ finally:
                     xytext=(6, 6), fontsize=8, color='red', fontweight='bold')
 
     if not HEADLESS:
-        plt.savefig("occupancy_map.png")
+        plt.savefig("assets/occupancy_map.png")
         plt.show()
