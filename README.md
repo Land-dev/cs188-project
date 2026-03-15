@@ -1,6 +1,21 @@
-# Drone Simulation Project
+# SLAM-Based Firefighting Drone Simulation
 
-A PyBullet-based drone simulation where an autonomous Crazyflie 2.x explores a maze, detects fires via **360° Panoramic Computer Vision**, and navigates to extinguish them — all while avoiding obstacles using lidar-based SLAM.
+A PyBullet-based drone simulation where an autonomous Crazyflie 2.x quadrotor performs Simultaneous Localization and Mapping (SLAM) in a hazardous indoor environment. The drone explores unknown layouts, builds an occupancy grid map via LiDAR sensing, and utilizes a custom **360° Panoramic Computer Vision** stack to locate and extinguish fire sources.
+
+<p align="center">
+  <img src="drone_cv_mission.gif" width="700" alt="Drone Mission Demo" />
+</p>
+
+## Project Overview
+
+This project simulates the core autonomy stack for an aerial firefighting robot. Operating in a 6x6m indoor arena with complex pillar obstacles, the drone must cope with:
+- **Sensor Uncertainty:** Position and LiDAR data are corrupted with Gaussian noise to simulate real-world hardware.
+- **Autonomous Exploration:** A frontier-based strategy ensures the drone systematically maps the entire room.
+- **Dynamic Path Planning:** An A* motion planner with 0.25m obstacle inflation keeps the drone safe from collisions.
+- **Visual Intelligence:** A 4-camera panoramic stitcher and OpenCV pipeline provide constant 360° situational awareness for fire detection.
+
+---
+
 
 ## Quick Start
 
@@ -30,10 +45,10 @@ python sim.py
 ## Project Structure
 
 | File | Description |
+| :--- | :--- |
 | `sim.py` | Main simulation loop — environment setup, SLAM, control, fire logic, optional localization |
 | `localization.py` | EKF pose estimator and sensor noise (noisy position, optional lidar range noise) |
-| `path_planning.py` | A\* planner with scipy-based obstacle inflation (soft cost margins) |
-| `test_path_planning.py` | Unit tests for path planning (obstacle avoidance, fire reachability) |
+| `path_planning.py` | A* planner with scipy-based obstacle inflation (soft cost margins) |
 | `run_batch.py` | Batch runner — runs N headless sims in parallel, reports success rate |
 | `install.sh` | One-command setup: conda env, pybullet patch, dependencies |
 | `vision.py` | Computer Vision module — HSV thresholding and contour detection logic |
