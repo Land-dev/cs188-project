@@ -5,6 +5,5 @@ __pycache__/
 *.pyo
 .DS_Store
 tmp/
-gym-pybullet-drones/
 *.mp4
 *.gif
