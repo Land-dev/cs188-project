@@ -1,6 +1,21 @@
-# Drone Simulation Project
+# SLAM-Based Firefighting Drone Simulation
 
-A PyBullet-based drone simulation where an autonomous Crazyflie 2.x explores a maze, detects fires via **360° Panoramic Computer Vision**, and navigates to extinguish them — all while avoiding obstacles using lidar-based SLAM.
+A PyBullet-based drone simulation where an autonomous Crazyflie 2.x quadrotor performs Simultaneous Localization and Mapping (SLAM) in a hazardous indoor environment. The drone explores unknown layouts, builds an occupancy grid map via LiDAR sensing, and utilizes a custom **360° Panoramic Computer Vision** stack to locate and extinguish fire sources.
+
+<p align="center">
+  <img src="assets/drone_cv_mission.gif" width="700" alt="Drone Mission Demo" />
+</p>
+
+## Project Overview
+
+This project simulates the core autonomy stack for an aerial firefighting robot. Operating in a 6x6m indoor arena with complex pillar obstacles, the drone must cope with:
+- **Sensor Uncertainty:** Position and LiDAR data are corrupted with Gaussian noise to simulate real-world hardware.
+- **Autonomous Exploration:** A frontier-based strategy ensures the drone systematically maps the entire room.
+- **Dynamic Path Planning:** An A* motion planner with 0.25m obstacle inflation keeps the drone safe from collisions.
+- **Visual Intelligence:** A 4-camera panoramic stitcher and OpenCV pipeline provide constant 360° situational awareness for fire detection.
+
+---
+
 
 ## Quick Start
 
@@ -29,17 +44,16 @@ python sim.py
 
 ## Project Structure
 
-| File | Description |
-| `sim.py` | Main simulation loop — environment setup, SLAM, control, fire logic, optional localization |
-| `localization.py` | EKF pose estimator and sensor noise (noisy position, optional lidar range noise) |
-| `path_planning.py` | A\* planner with scipy-based obstacle inflation (soft cost margins) |
-| `test_path_planning.py` | Unit tests for path planning (obstacle avoidance, fire reachability) |
+| Directory / File | Description |
+| :--- | :--- |
+| `sim.py` | Main simulation loop — environment setup, SLAM, control, fire logic |
 | `run_batch.py` | Batch runner — runs N headless sims in parallel, reports success rate |
+| `src/` | Core logic modules: `vision.py`, `path_planning.py`, `localization.py` |
+| `tests/` | Unit tests for CV and path planning |
+| `assets/` | Mission recording (GIF/MP4) and occupancy map assets |
+| `docs/` | Project documentation, including the final report |
+| `scripts/` | Utility scripts like `record_mission.sh` |
 | `install.sh` | One-command setup: conda env, pybullet patch, dependencies |
-| `vision.py` | Computer Vision module — HSV thresholding and contour detection logic |
-| `test_cv.py` | Unit tests for the Computer Vision fire detection system |
-| `test_path_planning.py` | Unit tests for navigation and obstacle avoidance logic |
-| `record_mission.sh` | Convenience script to record mission highlights (requires `ffmpeg`) |
 
 ## Running Tests
 
@@ -47,8 +61,8 @@ Verify the CV and navigation systems:
 
 ```bash
 conda activate drones
-python -m pytest test_cv.py -v
-python -m pytest test_path_planning.py -v
+python -m pytest tests/test_cv.py -v
+python -m pytest tests/test_path_planning.py -v
 ```
 
 ## Recording Missions
@@ -56,7 +70,7 @@ python -m pytest test_path_planning.py -v
 Capture a highlight of the drone's 360° CV feed:
 
 ```bash
-./record_mission.sh
+./scripts/record_mission.sh
 ```
 
 This generates a `drone_cv_mission.mp4` file showing the panoramic FPV feed used by the vision algorithm.

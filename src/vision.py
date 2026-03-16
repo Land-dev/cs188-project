@@ -6,10 +6,10 @@ def detect_fire_cv(rgba_image):
     Process the incoming RGBA frame from the drone's FPV camera using OpenCV.
     Returns (True, (cx, cy)) if an orange fire is detected in the frame, False otherwise.
     """
-    # 1. Convert RGBA to BGR
-    # PyBullet outputs RGBA (as float or int32), OpenCV expects uint8 BGR
-    rgba_image_uint8 = np.clip(rgba_image, 0, 255).astype(np.uint8)
-    bgr = cv2.cvtColor(rgba_image_uint8, cv2.COLOR_RGBA2BGR)
+    # PyBullet outputs RGBA uint8 usually, but we ensure it's uint8 for OpenCV
+    if rgba_image.dtype != np.uint8:
+        rgba_image = np.clip(rgba_image, 0, 255).astype(np.uint8)
+    bgr = cv2.cvtColor(rgba_image, cv2.COLOR_RGBA2BGR)
     
     # 2. Convert to HSV
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
