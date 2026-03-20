@@ -1,7 +1,4 @@
-"""
-Path planning on a 2D occupancy grid: coordinate conversion and A*.
-Occupancy: 0 = unknown, 128 = free, 200 = fire, 255 = obstacle.
-"""
+"""A* path planning on a 2D occupancy grid. Values: 0=unknown, 128=free, 200=fire, 255=obstacle."""
 import heapq
 import numpy as np
 from scipy.ndimage import binary_dilation, generate_binary_structure
@@ -44,17 +41,12 @@ def path_hits_obstacle(occupancy_map, map_size, map_res, start_xy, path, goal_xy
 
 
 def _inflate_obstacles(occupancy_map, map_res, safe_margin, goal_cell=None):
-    """
-    Create a cost map where cells near obstacles get a high penalty.
-    Uses scipy binary_dilation for speed instead of nested Python loops.
-    Returns a 2D float array of additional cost per cell (0.0 = safe, large = near obstacle).
-    """
+    """Return a cost map with penalty=50 for cells within safe_margin of obstacles."""
     map_dim = occupancy_map.shape[0]
     inflation_cells = int(np.ceil(safe_margin / map_res))
     if inflation_cells <= 0:
         return np.zeros((map_dim, map_dim), dtype=np.float32)
 
-    # Build a circular structuring element
     diameter = 2 * inflation_cells + 1
     struct = np.zeros((diameter, diameter), dtype=bool)
     for dx in range(-inflation_cells, inflation_cells + 1):
@@ -62,17 +54,13 @@ def _inflate_obstacles(occupancy_map, map_res, safe_margin, goal_cell=None):
             if dx * dx + dy * dy <= inflation_cells * inflation_cells:
                 struct[dx + inflation_cells, dy + inflation_cells] = True
 
-    # Only inflate real physical obstacles (255), NOT fire cells (200).
-    # Fire cells are handled by the passable() function in A*.
-    # Inflating fire creates a cost barrier that prevents the drone from reaching the fire.
+    # Only inflate physical obstacles (255), not fire cells (200) — inflating fire
+    # creates a cost barrier that blocks the drone from reaching it.
     obstacle_mask = (occupancy_map == 255)
-
-    # Dilate
     inflated = binary_dilation(obstacle_mask, structure=struct)
 
-    # Cost: 0 where safe, large penalty where inside inflated zone but not a real obstacle
     cost_map = np.zeros((map_dim, map_dim), dtype=np.float32)
-    cost_map[inflated & ~(occupancy_map == 255)] = 50.0  # penalty, not impassable
+    cost_map[inflated & ~obstacle_mask] = 50.0
     return cost_map
 
 
@@ -86,13 +74,11 @@ def plan_path(occupancy_map, map_size, map_res, start_xy, goal_xy, safe_margin=0
     smx, smy = world_to_map(start_xy[0], start_xy[1], map_size, map_res)
     gmx, gmy = world_to_map(goal_xy[0], goal_xy[1], map_size, map_res)
 
-    # Precompute inflation cost map once per call
     if safe_margin > 0.0:
         cost_map = _inflate_obstacles(occupancy_map, map_res, safe_margin, goal_cell=(gmx, gmy))
     else:
         cost_map = None
 
-    # Check if the goal is a fire — if so, all fire cells should be passable
     goal_is_fire = (0 <= gmx < map_dim and 0 <= gmy < map_dim and
                     occupancy_map[gmx, gmy] == 200)
 
@@ -103,9 +89,7 @@ def plan_path(occupancy_map, map_size, map_res, start_xy, goal_xy, safe_margin=0
         if val == 255:
             return False
         if val == 200:
-            # If navigating to a fire, all fire cells are passable (lidar marks a cluster)
-            # If not navigating to a fire, fire cells block the path
-            return goal_is_fire
+            return goal_is_fire  # fire cells only passable when navigating to fire
         return True
 
     if not passable(smx, smy) or not passable(gmx, gmy):
@@ -125,8 +109,6 @@ def plan_path(occupancy_map, map_size, map_res, start_xy, goal_xy, safe_margin=0
             if not passable(nx, ny):
                 continue
             step = 1.414 if dx != 0 and dy != 0 else 1.0
-
-            # Add soft margin penalty
             if cost_map is not None:
                 step += cost_map[nx, ny]
 
@@ -147,7 +129,6 @@ def plan_path(occupancy_map, map_size, map_res, start_xy, goal_xy, safe_margin=0
         cur = parent[cur]
     path_m.reverse()
 
-    # Subsample waypoints but keep every ~5 cells instead of 1/25th to avoid skipping around obstacles
     path_w = []
     step = max(1, len(path_m) // 40)
     for j in range(0, len(path_m), step):

@@ -33,7 +33,7 @@ python sim.py
 
 1. **Simulated Localization** — Optionally, the drone does not get perfect state: position is corrupted by Gaussian noise (e.g. GPS), and lidar ranges are perturbed. An EKF fuses the noisy position into an estimate; all planning, exploration, and map logic use this estimate. The drone must cope with both **where am I?** and **where are obstacles?** uncertainty (set `USE_LOCALIZATION = True` in `sim.py`).
 2. **SLAM Exploration** — The drone casts 144 lidar rays to build an occupancy map (unknown → free/obstacle/fire) while flying frontier-based exploration goals.
-3. **Fire Detection** — When lidar intersects a fire cylinder, the drone immediately replans a path to the fire.
+3. **Fire Detection** — Every 12 control steps the drone captures a 360° panorama and runs an OpenCV HSV pipeline to detect orange fire regions. After 5 consecutive confirmations, the drone replans toward the fire's known position.
 4. **A\* Path Planning with Obstacle Inflation** — Paths are planned on the occupancy grid using A\* with a configurable safe margin (`safe_margin=0.25m`). Obstacles are inflated using `scipy.ndimage.binary_dilation` to keep the drone a safe distance from walls and pillars.
 5. **Smooth PID Control** — A position-error clamp and tuned step size prevent aggressive maneuvers that could destabilize the drone.
 6. **360° Panoramic Vision** — The drone captures 4 cardinal FPV views (90° FOV each) and stitches them into a panoramic strip. This allows for constant, 360-degree situational awareness.
@@ -51,7 +51,6 @@ python sim.py
 | `src/` | Core logic modules: `vision.py`, `path_planning.py`, `localization.py` |
 | `tests/` | Unit tests for CV and path planning |
 | `assets/` | Mission recording (GIF/MP4) and occupancy map assets |
-| `docs/` | Project documentation, including the final report |
 | `scripts/` | Utility scripts like `record_mission.sh` |
 | `install.sh` | One-command setup: conda env, pybullet patch, dependencies |
 
